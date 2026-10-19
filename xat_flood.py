@@ -31,7 +31,10 @@ from rich.text import Text
 # constantes
 # --------------------------------------------------------------------------- #
 IP2_URL = "https://xat.com/web_gear/chat/ip2.php"
-ROOMID_URL = "https://xat.com/web_gear/chat/roomid.php?d={name}"
+ROOMID_URLS = [
+    "https://xat.com/web_gear/chat/roomid.php?d={name}",
+    "https://xat.com/api/roomid.php?d={name}",
+]
 
 PERLIN_URLS = {
     "100_100_5_100": "https://raw.githubusercontent.com/TwiN/PythonXatBot/master/100_100_5_100.txt",
@@ -44,6 +47,15 @@ GUEST_K1 = "5cfeb32e41588e383d00"
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+BROWSER_HEADERS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
+    "Referer": "https://xat.com/",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 LOGOUT_CODES = {
     "E03": "j2/y invalido - room ou userno ausente",
@@ -140,43 +152,59 @@ class Web:
     def __init__(self, proxy_urls: list, no_proxy: bool):
         self._proxy_urls = proxy_urls
         self._no_proxy = no_proxy
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._proxied: Optional[aiohttp.ClientSession] = None
+        self._direct: Optional[aiohttp.ClientSession] = None
 
     async def start(self):
+        self._direct = aiohttp.ClientSession()
         if self._no_proxy or not self._proxy_urls:
-            self._session = aiohttp.ClientSession()
+            self._proxied = self._direct
         else:
-            self._session = aiohttp.ClientSession(
-                connector=ProxyConnector.from_url(self._proxy_urls[0])
-            )
+            self._proxied = aiohttp.ClientSession(
+                connector=ProxyConnector.from_url(self._proxy_urls[0]))
 
     async def close(self):
-        if self._session:
-            await self._session.close()
+        if self._proxied and self._proxied is not self._direct:
+            await self._proxied.close()
+        if self._direct:
+            await self._direct.close()
+
+    async def _fetch_text(self, url: str) -> str:
+        sessions = [self._proxied] if self._proxied else []
+        if self._direct and self._direct is not self._proxied:
+            sessions.append(self._direct)
+        last: Optional[Exception] = None
+        for s in sessions:
+            try:
+                async with s.get(url, headers=BROWSER_HEADERS, timeout=25) as r:
+                    r.raise_for_status()
+                    return await r.text()
+            except Exception as e:  # fallback direto
+                last = e
+        raise last if last else RuntimeError("sem sessao http")
 
     async def get_json(self, url: str) -> dict:
-        headers = {"User-Agent": UA, "Accept": "application/json,text/plain,*/*"}
-        async with self._session.get(url, headers=headers, timeout=20) as r:
-            r.raise_for_status()
-            text = await r.text()
-            return json.loads(text)
+        return json.loads(await self._fetch_text(url))
 
     async def get_text(self, url: str) -> str:
-        headers = {"User-Agent": UA}
-        async with self._session.get(url, headers=headers, timeout=30) as r:
-            r.raise_for_status()
-            return await r.text()
+        return await self._fetch_text(url)
 
 
 async def resolve_roomid(web: Web, room: str) -> int:
     if room.isdigit():
         return int(room)
     from urllib.parse import quote
-    data = await web.get_json(ROOMID_URL.format(name=quote(room)))
-    rid = data.get("id")
-    if not rid:
-        raise SystemExit(f"[erro] sala '{room}' nao encontrada no xat.")
-    return int(rid)
+    name = quote(room)
+    last: Optional[Exception] = None
+    for url in ROOMID_URLS:
+        try:
+            data = await web.get_json(url.format(name=name))
+            rid = data.get("id")
+            if rid:
+                return int(rid)
+        except Exception as e:
+            last = e
+    raise SystemExit(f"[erro] sala '{room}' nao encontrada (ultimo erro: {last})")
 
 
 # --------------------------------------------------------------------------- #
