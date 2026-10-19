@@ -31,7 +31,7 @@ class Config:
     challenge_wait: float = 45.0
     viewport: tuple = (700, 520)     # menor = menos CPU
     concurrency: int = 8             # abas simultaneas no spawn
-    keepalive: float = 60.0          # segundos entre "acoes"
+    keepalive: float = 45.0          # segundos entre "acoes" (abaixo do idle kick)
     msg: str = "oi"
 
 
@@ -151,34 +151,30 @@ async def load_slot(slot: Slot, cfg: Config, idx: int) -> bool:
 
 
 async def do_action(slot: Slot, cfg: Config):
-    """Envia uma mensagem no chat = a 'acao' que registra o id do guest."""
+    """Envia uma mensagem no chat = a 'acao' que segura o guest vivo."""
     page = slot.page
-    try:
-        frame = None
-        for f in page.frames:
-            if f != page.main_frame and "xat" in (f.url or ""):
-                frame = f
-                break
-        if frame is None:
-            for f in page.frames:
-                if f != page.main_frame:
-                    frame = f
-                    break
-        if frame is None:
-            return
-        sel = ("#sendmsg, textarea, input[type='text'], "
-               "[contenteditable='true'], input:not([type])")
-        inp = frame.locator(sel).first
-        await inp.click(timeout=4000)
-        await inp.type(cfg.msg, delay=40)
-        await inp.press("Enter", timeout=4000)
-        slot.actions += 1
-    except Exception:
-        pass
+    sel_priority = ["#sendmsg", "#sendMsg", "textarea",
+                    "[contenteditable='true']", "[role='textbox']",
+                    "input[type='text']", "input"]
+    frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
+    for frame in frames:
+        for sel in sel_priority:
+            try:
+                loc = frame.locator(sel).first
+                await loc.wait_for(state="visible", timeout=1200)
+                await loc.click(timeout=1200)
+                await loc.type(cfg.msg, delay=25)
+                await loc.press("Enter", timeout=1200)
+                slot.actions += 1
+                if slot.actions == 1:
+                    print(f"    [acao ok] frame={frame.url[:45]} sel={sel}")
+                return
+            except Exception:
+                continue
 
 
 async def keep_alive(slot: Slot, cfg: Config):
-    await asyncio.sleep(cfg.keepalive)
+    await asyncio.sleep(10)  # primeira acao cedo, antes do kick de idle
     while not slot.page.is_closed():
         await do_action(slot, cfg)
         await asyncio.sleep(cfg.keepalive)
