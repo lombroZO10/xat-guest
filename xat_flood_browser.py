@@ -49,6 +49,21 @@ if (oq) {
 }
 """
 
+NAME_POOL = ["carlos", "pedro", "lucas", "gabriel", "rafael", "bruno", "felipe",
+             "diego", "mariana", "julia", "beatriz", "larissa", "camila", "amanda",
+             "ana", "luan", "vinicius", "gustavo", "fernando", "andre"]
+
+
+def gen_name(i: int) -> str:
+    return f"{NAME_POOL[i % len(NAME_POOL)]}{random.randint(100, 9999)}"
+
+
+def stealth_js(name: str) -> str:
+    inject = ("try { const ks = ['w_name','name','xat_name','nickname','guest_name']; "
+              "for (const k of ks) { try { localStorage.setItem(k, "
+              + json.dumps(name) + "); } catch(e){} } } catch(e){}")
+    return STEALTH_JS + "\n" + inject
+
 
 def _norm_proxy(p: str) -> str:
     p = p.strip()
@@ -71,7 +86,7 @@ def parse_args(argv) -> Config:
     ap.add_argument("--connect-delay", type=float, default=1.0)
     ap.add_argument("--challenge-wait", type=float, default=45.0)
     ap.add_argument("--concurrency", type=int, default=8)
-    ap.add_argument("--keepalive", type=float, default=60.0,
+    ap.add_argument("--keepalive", type=float, default=45.0,
                     help="intervalo (s) da 'acao' que segura o guest vivo")
     ap.add_argument("--msg", default="oi", help="mensagem da acao")
     args = ap.parse_args(argv)
@@ -97,14 +112,16 @@ def parse_args(argv) -> Config:
 
 
 class Slot:
-    __slots__ = ("context", "page", "ws_count", "proxy", "actions")
+    __slots__ = ("context", "page", "ws_count", "proxy", "actions", "name")
 
-    def __init__(self, context: BrowserContext, page: Page, proxy: str | None):
+    def __init__(self, context: BrowserContext, page: Page, proxy: str | None,
+                 name: str):
         self.context = context
         self.page = page
         self.ws_count = 0
         self.proxy = proxy
         self.actions = 0
+        self.name = name
 
     def is_closed(self) -> bool:
         return self.page.is_closed()
@@ -196,7 +213,7 @@ def render(cfg: Config, slots: list, start: float) -> str:
         if s is None:
             lines.append(f"{i+1:>3}  AGUARDANDO")
         else:
-            lines.append(f"{i+1:>3}  {s.status():<11} {s.proxy or 'direto'}")
+            lines.append(f"{i+1:>3}  {s.status():<11} {s.name:<14} {s.proxy or 'direto'}")
     return "\n".join(lines)
 
 
@@ -213,14 +230,14 @@ async def amain(cfg: Config):
                 return None
             return cfg.proxies[i % len(cfg.proxies)]
 
-        async def new_slot(proxy: str | None) -> Slot:
+        async def new_slot(proxy: str | None, name: str) -> Slot:
             ctx_kwargs = {"viewport": {"width": cfg.viewport[0], "height": cfg.viewport[1]}}
             if proxy:
                 ctx_kwargs["proxy"] = {"server": proxy}
             context = await browser.new_context(**ctx_kwargs)
-            await context.add_init_script(STEALTH_JS)
+            await context.add_init_script(stealth_js(name))
             page = await context.new_page()
-            return Slot(context, page, proxy)
+            return Slot(context, page, proxy, name)
 
         slots: list[Slot | None] = [None] * cfg.count
         sem = asyncio.Semaphore(cfg.concurrency)
@@ -228,7 +245,7 @@ async def amain(cfg: Config):
 
         async def spawn_one(i: int):
             async with sem:
-                slot = await new_slot(proxy_for(i))
+                slot = await new_slot(proxy_for(i), gen_name(i))
                 slots[i] = slot
                 ok = False
                 try:
@@ -250,7 +267,7 @@ async def amain(cfg: Config):
                         await s.context.close()
                     except Exception:
                         pass
-                    ns = await new_slot(proxy_for(i))
+                    ns = await new_slot(proxy_for(i), gen_name(i))
                     slots[i] = ns
                     try:
                         if await load_slot(ns, cfg, i + 1):
