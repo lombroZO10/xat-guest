@@ -38,13 +38,14 @@ ROOMID_URLS = [
 
 LEGACY_HOST = "s.xat.com"  # endpoint TCP cru historico, fala XMLSocket direto
 
+AUSER3_URL = "https://xat.com/web_gear/chat/auser3.php"  # gera UserId + k1 por IP
+
 PERLIN_URLS = {
     "100_100_5_100": "https://raw.githubusercontent.com/TwiN/PythonXatBot/master/100_100_5_100.txt",
     "100_100_5_101": "https://raw.githubusercontent.com/TwiN/PythonXatBot/master/100_100_5_101.txt",
 }
 
-# k1 de convidado (unregistered). Fixo no cliente xat; troque com --k1 se o
-# servidor responder <v e="60"/> ou <logout e="E07"/>.
+# k1 de convidado legado (2016). Hoje o par UserId+k1 vem do auser3.php.
 GUEST_K1 = "5cfeb32e41588e383d00"
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -126,7 +127,8 @@ class Config:
     count: int = 50
     proxy: list = field(default_factory=list)   # urls completas scheme://user:pass@host:port
     proxy_type: str = "socks5"
-    k1: str = GUEST_K1
+    k1: Optional[str] = None      # override manual; None = usa auser3.php
+    userid: Optional[str] = None  # userno do override manual (par do --k1)
     names: list = field(default_factory=list)
     avatar: int = -1               # -1 = aleatorio por conexao
     keepalive: float = 120.0
@@ -164,7 +166,8 @@ class Web:
             self._proxied = self._direct
         else:
             self._proxied = aiohttp.ClientSession(
-                connector=ProxyConnector.from_url(self._proxy_urls[0]))
+                connector=ProxyConnector.from_url(self._proxy_urls[0],
+                                                  force_close=True))
 
     async def close(self):
         for s in (self._proxied, self._direct):
@@ -174,6 +177,11 @@ class Web:
                 except Exception:
                     pass
 
+    async def _get(self, session, url: str) -> str:
+        async with session.get(url, headers=BROWSER_HEADERS, timeout=25) as r:
+            r.raise_for_status()
+            return await r.text()
+
     async def _fetch_text(self, url: str) -> str:
         sessions = [self._proxied] if self._proxied else []
         if self._direct and self._direct is not self._proxied:
@@ -181,12 +189,25 @@ class Web:
         last: Optional[Exception] = None
         for s in sessions:
             try:
-                async with s.get(url, headers=BROWSER_HEADERS, timeout=25) as r:
-                    r.raise_for_status()
-                    return await r.text()
+                return await self._get(s, url)
             except Exception as e:  # fallback direto
                 last = e
         raise last if last else RuntimeError("sem sessao http")
+
+    async def _fetch_proxy_only(self, url: str) -> str:
+        if self._proxied is None:
+            raise ConnError("proxy indisponivel")
+        return await self._get(self._proxied, url)
+
+    async def get_new_user(self) -> tuple[str, str, str]:
+        text = await self._fetch_proxy_only(AUSER3_URL)
+        m = re.search(r"UserId=(\d+)&k1=([0-9a-fA-F]+)&k2=(\d+)", text)
+        if not m:
+            raise ConnError(f"auser3: resposta inesperada ({text[:60]!r})")
+        uid, k1, k2 = m.group(1), m.group(2), m.group(3)
+        if int(uid) >= 1800000000 or k2 == "0":
+            raise ConnError("auser3 recusou (rate limit) - aguarde e tente de novo")
+        return uid, k1, k2
 
     async def get_json(self, url: str) -> dict:
         return json.loads(await self._fetch_text(url))
@@ -327,14 +348,17 @@ class ConnError(Exception):
 
 class Conn:
     def __init__(self, idx: int, cfg: Config, rules: dict,
-                 perlin: Perlin, proxies: ProxyPool):
+                 web: Web, perlin: Perlin, proxies: ProxyPool):
         self.idx = idx
         self.cfg = cfg
         self.rules = rules
+        self.web = web
         self.perlin = perlin
         self.proxies = proxies
 
-        self.userno = random.randint(10**8, 10**10 - 1)
+        self.userno: Optional[str] = None   # vem do auser3.php
+        self.k1: Optional[str] = None
+        self.k2: Optional[str] = None
         self.name = self._pick_name()
         self.avatar = random.randint(0, 1758) if cfg.avatar < 0 else cfg.avatar
 
@@ -356,6 +380,18 @@ class Conn:
             return self.cfg.names[self.idx % len(self.cfg.names)]
         base = random.choice(NAME_POOL)
         return f"{base}_{random.randint(1000, 9999)}"
+
+    # -- identidade guest -------------------------------------------------- #
+    async def _ensure_user(self):
+        if self.userno is not None:
+            return
+        if self.cfg.userid and self.cfg.k1:
+            self.userno, self.k1, self.k2 = self.cfg.userid, self.cfg.k1, "0"
+        else:
+            self.userno, self.k1, self.k2 = await self.web.get_new_user()
+
+    def _clear_user(self):
+        self.userno = self.k1 = self.k2 = None
 
     # -- io ---------------------------------------------------------------- #
     async def _send(self, tag: str, attrs: dict, order: Optional[list] = None):
@@ -395,6 +431,7 @@ class Conn:
 
     # -- handshake --------------------------------------------------------- #
     async def _handshake(self):
+        await self._ensure_user()
         host, port = pick_server(self.rules, self.cfg.roomid, self.attempt,
                                  self.cfg.legacy)
         self.state = "CONECTANDO"
@@ -413,9 +450,11 @@ class Conn:
             if tag == "y":
                 break
             if tag == "logout":
+                self._clear_user()
                 raise ConnError(f"logout {attrs.get('e','')} "
                                 f"({LOGOUT_CODES.get(attrs.get('e',''), '?' )})")
             if tag == "v" and attrs.get("e") == "60":
+                self._clear_user()
                 raise ConnError("k1 recusada (<v e=60>) - atualize --k1")
 
         if attrs.get("C") == "1":
@@ -431,7 +470,7 @@ class Conn:
             "cb": "0", "Y": "2", "l5": l5,
             "l4": str(int((time.monotonic() - t_start) * 1000)),
             "l3": str(jt2), "l2": "0",
-            "y": yi, "k": self.cfg.k1, "k3": "0", "p": "0",
+            "y": yi, "k": self.k1, "k3": "0", "p": "0",
             "c": str(self.cfg.roomid), "f": "0", "u": str(self.userno),
             "d0": "0", "n": self.name, "a": str(self.avatar), "h": "", "v": "0",
         }
@@ -445,11 +484,14 @@ class Conn:
             if tag == "done":
                 return
             if tag == "logout":
+                self._clear_user()
                 raise ConnError(f"logout {attrs.get('e','')} "
                                 f"({LOGOUT_CODES.get(attrs.get('e',''), '?' )})")
             if tag == "dup":
+                self._clear_user()
                 raise ConnError("dup - userno duplicado")
             if tag == "v" and attrs.get("e") == "60":
+                self._clear_user()
                 raise ConnError("k1 recusada (<v e=60>)")
 
     # -- pos-join ---------------------------------------------------------- #
@@ -584,7 +626,7 @@ def render_dashboard(cfg: Config, conns: list, start: float) -> Group:
             str(c.idx),
             f"[{style}]{c.state}[/]",
             c.proxy_label,
-            str(c.userno),
+            str(c.userno) if c.userno else "-",
             c.name + (" " + uptime_c if uptime_c else ""),
             str(c.keepalives),
             str(c.msgs),
@@ -606,7 +648,10 @@ def parse_args(argv) -> Config:
                     help="proxy user:pass@host:port (repita p/ varios)")
     ap.add_argument("--proxy-type", default="socks5", choices=["socks5", "socks4", "http"])
     ap.add_argument("--no-proxy", action="store_true", help="conecta direto (sem proxy)")
-    ap.add_argument("--k1", default=GUEST_K1, help="k1 de convidado (override)")
+    ap.add_argument("--k1", default=None,
+                    help="k1 manual (override; usar junto com --userid)")
+    ap.add_argument("--userid", default=None,
+                    help="userno manual (override; usar junto com --k1)")
     ap.add_argument("--names", help="nomes separados por virgula (cicla)")
     ap.add_argument("--avatar", type=int, default=-1, help="avatar fixo (0-1758)")
     ap.add_argument("--keepalive", type=float, default=120.0)
@@ -621,7 +666,7 @@ def parse_args(argv) -> Config:
     cfg = Config(
         room=args.room, count=args.count,
         proxy=[normalize_proxy(p, args.proxy_type) for p in args.proxy],
-        proxy_type=args.proxy_type, k1=args.k1,
+        proxy_type=args.proxy_type, k1=args.k1, userid=args.userid,
         names=args.names.split(",") if args.names else [],
         avatar=args.avatar, keepalive=args.keepalive,
         connect_delay=args.connect_delay, spam=args.spam,
@@ -646,7 +691,7 @@ async def amain(cfg: Config, console: Console):
 
     perlin = Perlin(cfg.perlin_dir, web)
     proxies = ProxyPool(cfg.proxy)
-    conns = [Conn(i, cfg, rules, perlin, proxies)
+    conns = [Conn(i, cfg, rules, web, perlin, proxies)
              for i in range(1, cfg.count + 1)]
 
     stop = asyncio.Event()
