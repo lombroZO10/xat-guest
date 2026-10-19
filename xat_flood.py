@@ -36,6 +36,8 @@ ROOMID_URLS = [
     "https://xat.com/api/roomid.php?d={name}",
 ]
 
+LEGACY_HOST = "s.xat.com"  # endpoint TCP cru historico, fala XMLSocket direto
+
 PERLIN_URLS = {
     "100_100_5_100": "https://raw.githubusercontent.com/TwiN/PythonXatBot/master/100_100_5_100.txt",
     "100_100_5_101": "https://raw.githubusercontent.com/TwiN/PythonXatBot/master/100_100_5_101.txt",
@@ -137,6 +139,7 @@ class Config:
     perlin_dir: Path = Path.home() / ".cache" / "xat_flood"
     verbose: bool = False
     no_proxy: bool = False
+    legacy: bool = False          # forca s.xat.com em vez dos pools do ip2.php
 
 
 def normalize_proxy(raw: str, ptype: str) -> str:
@@ -164,10 +167,12 @@ class Web:
                 connector=ProxyConnector.from_url(self._proxy_urls[0]))
 
     async def close(self):
-        if self._proxied and self._proxied is not self._direct:
-            await self._proxied.close()
-        if self._direct:
-            await self._direct.close()
+        for s in (self._proxied, self._direct):
+            if s is not None:
+                try:
+                    await s.close()
+                except Exception:
+                    pass
 
     async def _fetch_text(self, url: str) -> str:
         sessions = [self._proxied] if self._proxied else []
@@ -230,7 +235,10 @@ def _get_port(roomid: int, xflag: int) -> int:
     return 10007 + (roomid % 32)
 
 
-def pick_server(rules: dict, roomid: int, attempt: int) -> tuple[str, int]:
+def pick_server(rules: dict, roomid: int, attempt: int,
+                legacy: bool = False) -> tuple[str, int]:
+    if legacy:
+        return LEGACY_HOST, _get_port(roomid, 0)
     order = rules["order"]
     xflag = int(rules.get("xFlag", 0))
     pool_name, _weight = order[attempt % len(order)]
@@ -387,7 +395,8 @@ class Conn:
 
     # -- handshake --------------------------------------------------------- #
     async def _handshake(self):
-        host, port = pick_server(self.rules, self.cfg.roomid, self.attempt)
+        host, port = pick_server(self.rules, self.cfg.roomid, self.attempt,
+                                 self.cfg.legacy)
         self.state = "CONECTANDO"
         await self._connect(host, port)
         self.attempt += 1
@@ -604,6 +613,8 @@ def parse_args(argv) -> Config:
     ap.add_argument("--connect-delay", type=float, default=0.15)
     ap.add_argument("--spam", help="mensagem opcional para spammar no chat")
     ap.add_argument("--spam-interval", type=float, default=15.0)
+    ap.add_argument("--legacy-server", action="store_true",
+                    help="forca s.xat.com (TCP cru) em vez dos pools do ip2.php")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -615,7 +626,7 @@ def parse_args(argv) -> Config:
         avatar=args.avatar, keepalive=args.keepalive,
         connect_delay=args.connect_delay, spam=args.spam,
         spam_interval=args.spam_interval, verbose=args.verbose,
-        no_proxy=args.no_proxy,
+        no_proxy=args.no_proxy, legacy=args.legacy_server,
     )
     return cfg
 
