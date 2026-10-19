@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 # language: Python 3.10+ | target: Ubuntu Linux VPS | runtime: asyncio
 # xat.com lotador de sala via navegador headless (Playwright/Chromium).
-# Inclui stealth (esconde headless do Cloudflare) + espera o desafio resolver
-# + deteccao real de entrada na sala. Rode na VPS.
+# Cada conexao ganha um CONTEXTO proprio (cookies/localStorage isolados) pra
+# virar um guest distinto. Stealth + espera do Cloudflare + deteccao por WS.
+# Rode na VPS, de preferencia com xvfb + --headed.
 
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ import sys
 import time
 from dataclasses import dataclass
 
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import async_playwright, Page, BrowserContext
 
 
 @dataclass
@@ -24,7 +25,7 @@ class Config:
     headless: bool = True
     connect_delay: float = 1.0
     url_timeout: int = 60_000
-    challenge_wait: float = 30.0      # segundos max esperando o cf resolver
+    challenge_wait: float = 30.0
     viewport: tuple = (1000, 760)
 
 
@@ -46,7 +47,7 @@ if (oq) {
 def parse_args(argv) -> Config:
     ap = argparse.ArgumentParser(
         prog="xat_flood_browser",
-        description="Lotador xat.com via navegador headless (stealth)")
+        description="Lotador xat.com via navegador headless (contexto por conexao)")
     ap.add_argument("--room", required=True)
     ap.add_argument("--count", type=int, default=10)
     ap.add_argument("--proxy", default=None)
@@ -59,55 +60,68 @@ def parse_args(argv) -> Config:
                   challenge_wait=args.challenge_wait)
 
 
-async def _joined(page: Page) -> bool:
-    """Tenta determinar se a aba passou do Cloudflare e entrou na sala."""
-    try:
-        if page.is_closed():
-            return False
-        url = page.url
-        if "__cf_chl" in url:
-            return False
-        # o chat vive num iframe (xatframe); se existir, entrou
-        n = await page.locator("iframe").count()
-        return n > 0
-    except Exception:
-        return False
+class Slot:
+    """Um contexto + uma pagina = um guest isolado."""
+    __slots__ = ("context", "page", "ws_count")
+
+    def __init__(self, context: BrowserContext, page: Page):
+        self.context = context
+        self.page = page
+        self.ws_count = 0
+
+    def is_closed(self) -> bool:
+        return self.page.is_closed()
+
+    def status(self) -> str:
+        try:
+            if self.page.is_closed():
+                return "FECHADA"
+            if "__cf_chl" in self.page.url:
+                return "DESAFIO"
+            if self.ws_count > 0:
+                return "ENTROU"
+            return "CARREGANDO"
+        except Exception:
+            return "?"
 
 
-async def load_page(page: Page, cfg: Config, idx: int):
+async def load_slot(slot: Slot, cfg: Config, idx: int) -> bool:
+    page = slot.page
+
+    def on_ws(ws):
+        if "xat.com" in ws.url:
+            slot.ws_count += 1
+
+    page.on("websocket", on_ws)
+
     await page.goto(f"https://xat.com/{cfg.room}",
                     wait_until="domcontentloaded", timeout=cfg.url_timeout)
-    # espera o desafio do cloudflare resolver (url limpa + iframe)
+
     t0 = time.time()
     while time.time() - t0 < cfg.challenge_wait:
-        if await _joined(page):
-            print(f"[aba {idx}] ENTROU (iframe ok) em {int(time.time()-t0)}s")
+        if slot.ws_count > 0:
+            print(f"[{idx}] ENTROU (ws xat) em {int(time.time()-t0)}s")
             return True
         await asyncio.sleep(1.0)
+
     url = page.url
     if "__cf_chl" in url:
-        print(f"[aba {idx}] DESAFIO travado (cloudflare nao resolveu): {url[:70]}")
+        print(f"[{idx}] DESAFIO travado: {url[:60]}")
     else:
-        print(f"[aba {idx}] sem iframe (talvez sem chat): {url[:70]}")
+        print(f"[{idx}] sem ws xat: url={url[:50]}")
     return False
 
 
-def render(cfg: Config, pages: list, start: float) -> str:
+def render(cfg: Config, slots: list, start: float) -> str:
     now = time.time()
-    joined = sum(1 for p in pages if not p.is_closed() and "__cf_chl" not in p.url)
-    open_ = sum(1 for p in pages if not p.is_closed())
+    joined = sum(1 for s in slots if not s.is_closed() and s.ws_count > 0)
+    open_ = sum(1 for s in slots if not s.is_closed())
     lines = [
-        f"XAT FLOOD (browser)  sala={cfg.room}  alvo={cfg.count}  abas={open_}/{len(pages)}  sem-desafio={joined}  uptime={int(now-start)}s",
+        f"XAT FLOOD  sala={cfg.room}  alvo={cfg.count}  abas={open_}/{len(slots)}  com-ws={joined}  uptime={int(now-start)}s",
         "-" * 72,
     ]
-    for i, p in enumerate(pages):
-        if p.is_closed():
-            st = "FECHADA"
-        elif "__cf_chl" in p.url:
-            st = "DESAFIO"
-        else:
-            st = "ABERTA"
-        lines.append(f"{i+1:>3}  {st:<9} {p.url[:58]}")
+    for i, s in enumerate(slots):
+        lines.append(f"{i+1:>3}  {s.status():<11} {s.page.url[:55] if not s.page.is_closed() else ''}")
     return "\n".join(lines)
 
 
@@ -117,36 +131,44 @@ async def amain(cfg: Config):
             headless=cfg.headless,
             args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
                   "--disable-blink-features=AutomationControlled"])
-        ctx_kwargs = {"viewport": {"width": cfg.viewport[0], "height": cfg.viewport[1]}}
-        if cfg.proxy:
-            ctx_kwargs["proxy"] = {"server": cfg.proxy}
-        context = await browser.new_context(**ctx_kwargs)
-        await context.add_init_script(STEALTH_JS)
 
-        pages: list[Page] = []
+        async def new_slot() -> Slot:
+            ctx_kwargs = {"viewport": {"width": cfg.viewport[0], "height": cfg.viewport[1]}}
+            if cfg.proxy:
+                ctx_kwargs["proxy"] = {"server": cfg.proxy}
+            context = await browser.new_context(**ctx_kwargs)
+            await context.add_init_script(STEALTH_JS)
+            page = await context.new_page()
+            return Slot(context, page)
+
+        slots: list[Slot] = []
         start = time.time()
 
         for i in range(1, cfg.count + 1):
-            page = await context.new_page()
-            pages.append(page)
+            slot = await new_slot()
+            slots.append(slot)
             try:
-                await load_page(page, cfg, i)
+                await load_slot(slot, cfg, i)
             except Exception as e:
-                print(f"[aba {i}] erro: {e}")
+                print(f"[{i}] erro: {e}")
             await asyncio.sleep(cfg.connect_delay)
 
-        print("\nAbas abertas. Mantendo vivas (Ctrl+C encerra).\n")
+        print("\nConectados. Mantendo vivos (Ctrl+C encerra).\n")
 
         while True:
-            for i, p in enumerate(pages):
-                if p.is_closed():
-                    np_ = await context.new_page()
-                    pages[i] = np_
+            for i, s in enumerate(slots):
+                if s.is_closed():
                     try:
-                        await load_page(np_, cfg, i + 1)
+                        await s.context.close()
+                    except Exception:
+                        pass
+                    ns = await new_slot()
+                    slots[i] = ns
+                    try:
+                        await load_slot(ns, cfg, i + 1)
                     except Exception as e:
-                        print(f"[aba {i+1}] reabertura erro: {e}")
-            print(render(cfg, pages, start))
+                        print(f"[{i+1}] reabertura erro: {e}")
+            print(render(cfg, slots, start))
             await asyncio.sleep(10.0)
 
 
