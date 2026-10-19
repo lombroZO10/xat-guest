@@ -379,6 +379,10 @@ class Conn:
             l5 = await self.perlin.l5(attrs["p"], int(yi))
         elapsed = int((time.monotonic() - t_start) * 1000)
 
+        if self.cfg.verbose:
+            sys.stderr.write(f"[conn {self.idx}] server_y={attrs}\n")
+            sys.stderr.write(f"[conn {self.idx}] yi={yi} p={attrs.get('p')} l5={l5}\n")
+
         j2_attrs = {
             "cb": "0", "Y": "2", "l5": l5,
             "l4": str(elapsed), "l3": str(elapsed), "l2": "0",
