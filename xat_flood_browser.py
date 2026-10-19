@@ -4,8 +4,8 @@
 # xat.com lotador de sala via navegador headless (Playwright/Chromium).
 # - contexto + proxy proprio por conexao (IP distinto)
 # - spawn paralelo (limitado por --concurrency)
-# - "acao" periodica (envia mensagem) pra registrar o id do guest e segurar vivo
-# - bloqueia imagem/fonte/midia pra economizar CPU/RAM
+# - carrega so o box do chat (embed.html) pra economizar CPU/RAM
+# - "acao" periodica (mensagem) registra o id do guest e segura vivo
 
 from __future__ import annotations
 
@@ -128,6 +128,8 @@ async def load_slot(slot: Slot, cfg: Config, idx: int) -> bool:
     def on_ws(ws):
         if "xat.com" in ws.url:
             slot.ws_count += 1
+            if slot.ws_count == 2:
+                print(f"    [{idx}] reconectou (id registrado)")
 
     page.on("websocket", on_ws)
     await page.goto(
@@ -174,7 +176,8 @@ async def do_action(slot: Slot, cfg: Config):
 
 
 async def keep_alive(slot: Slot, cfg: Config):
-    await asyncio.sleep(10)  # primeira acao cedo, antes do kick de idle
+    # primeira acao com atraso aleatorio: nao reconecta 8 de uma vez
+    await asyncio.sleep(random.uniform(10, 30))
     while not slot.page.is_closed():
         await do_action(slot, cfg)
         await asyncio.sleep(cfg.keepalive)
