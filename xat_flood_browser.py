@@ -2,14 +2,17 @@
 # -*- coding: utf-8 -*-
 # language: Python 3.10+ | target: Ubuntu Linux VPS | runtime: asyncio
 # xat.com lotador de sala via navegador headless (Playwright/Chromium).
-# Cada conexao = contexto proprio + proxy proprio (IP distinto). Stealth +
-# espera do Cloudflare + deteccao por WebSocket. Rode na VPS com xvfb --headed.
+# - contexto + proxy proprio por conexao (IP distinto)
+# - spawn paralelo (limitado por --concurrency)
+# - "acao" periodica (envia mensagem) pra registrar o id do guest e segurar vivo
+# - bloqueia imagem/fonte/midia pra economizar CPU/RAM
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import random
 import sys
 import time
 from dataclasses import dataclass, field
@@ -21,12 +24,16 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 class Config:
     room: str
     count: int = 10
-    proxies: list = field(default_factory=list)   # scheme://user:pass@host:port
+    proxies: list = field(default_factory=list)
     headless: bool = True
     connect_delay: float = 1.0
     url_timeout: int = 60_000
-    challenge_wait: float = 30.0
-    viewport: tuple = (1000, 760)
+    challenge_wait: float = 45.0
+    viewport: tuple = (700, 520)     # menor = menos CPU
+    concurrency: int = 8             # abas simultaneas no spawn
+    keepalive: float = 60.0          # segundos entre "acoes"
+    msg: str = "oi"
+    block_media: bool = True
 
 
 STEALTH_JS = """
@@ -63,7 +70,13 @@ def parse_args(argv) -> Config:
                     help="arquivo JSON (chave 'endpoints') ou TXT (um por linha)")
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--connect-delay", type=float, default=1.0)
-    ap.add_argument("--challenge-wait", type=float, default=30.0)
+    ap.add_argument("--challenge-wait", type=float, default=45.0)
+    ap.add_argument("--concurrency", type=int, default=8)
+    ap.add_argument("--keepalive", type=float, default=60.0,
+                    help="intervalo (s) da 'acao' que segura o guest vivo")
+    ap.add_argument("--msg", default="oi", help="mensagem da acao")
+    ap.add_argument("--no-block-media", action="store_true",
+                    help="nao bloquear imagens/fontes (usa mais CPU)")
     args = ap.parse_args(argv)
 
     proxies = []
@@ -82,17 +95,20 @@ def parse_args(argv) -> Config:
                 proxies.append(x)
     return Config(room=args.room, count=args.count, proxies=proxies,
                   headless=not args.headed, connect_delay=args.connect_delay,
-                  challenge_wait=args.challenge_wait)
+                  challenge_wait=args.challenge_wait, concurrency=args.concurrency,
+                  keepalive=args.keepalive, msg=args.msg,
+                  block_media=not args.no_block_media)
 
 
 class Slot:
-    __slots__ = ("context", "page", "ws_count", "proxy")
+    __slots__ = ("context", "page", "ws_count", "proxy", "actions")
 
     def __init__(self, context: BrowserContext, page: Page, proxy: str | None):
         self.context = context
         self.page = page
         self.ws_count = 0
         self.proxy = proxy
+        self.actions = 0
 
     def is_closed(self) -> bool:
         return self.page.is_closed()
@@ -137,16 +153,54 @@ async def load_slot(slot: Slot, cfg: Config, idx: int) -> bool:
     return False
 
 
+async def do_action(slot: Slot, cfg: Config):
+    """Envia uma mensagem no chat = a 'acao' que registra o id do guest."""
+    page = slot.page
+    try:
+        frame = None
+        for f in page.frames:
+            if f != page.main_frame and "xat" in (f.url or ""):
+                frame = f
+                break
+        if frame is None:
+            for f in page.frames:
+                if f != page.main_frame:
+                    frame = f
+                    break
+        if frame is None:
+            return
+        sel = ("#sendmsg, textarea, input[type='text'], "
+               "[contenteditable='true'], input:not([type])")
+        inp = frame.locator(sel).first
+        await inp.click(timeout=4000)
+        await inp.type(cfg.msg, delay=40)
+        await inp.press("Enter", timeout=4000)
+        slot.actions += 1
+    except Exception:
+        pass
+
+
+async def keep_alive(slot: Slot, cfg: Config):
+    await asyncio.sleep(cfg.keepalive)
+    while not slot.page.is_closed():
+        await do_action(slot, cfg)
+        await asyncio.sleep(cfg.keepalive)
+
+
 def render(cfg: Config, slots: list, start: float) -> str:
     now = time.time()
-    joined = sum(1 for s in slots if not s.is_closed() and s.ws_count > 0)
-    open_ = sum(1 for s in slots if not s.is_closed())
+    joined = sum(1 for s in slots if s is not None and not s.is_closed() and s.ws_count > 0)
+    actions = sum(s.actions for s in slots if s is not None)
+    open_ = sum(1 for s in slots if s is not None and not s.is_closed())
     lines = [
-        f"XAT FLOOD  sala={cfg.room}  alvo={cfg.count}  abas={open_}/{len(slots)}  com-ws={joined}  uptime={int(now-start)}s",
+        f"XAT FLOOD  sala={cfg.room}  alvo={cfg.count}  abas={open_}/{len(slots)}  com-ws={joined}  acoes={actions}  uptime={int(now-start)}s",
         "-" * 72,
     ]
     for i, s in enumerate(slots):
-        lines.append(f"{i+1:>3}  {s.status():<11} {s.proxy or 'direto'}")
+        if s is None:
+            lines.append(f"{i+1:>3}  AGUARDANDO")
+        else:
+            lines.append(f"{i+1:>3}  {s.status():<11} {s.proxy or 'direto'}")
     return "\n".join(lines)
 
 
@@ -155,7 +209,8 @@ async def amain(cfg: Config):
         browser = await pw.chromium.launch(
             headless=cfg.headless,
             args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-                  "--disable-blink-features=AutomationControlled"])
+                  "--disable-blink-features=AutomationControlled",
+                  "--disable-extensions", "--mute-audio"])
 
         def proxy_for(i: int) -> str | None:
             if not cfg.proxies:
@@ -168,26 +223,40 @@ async def amain(cfg: Config):
                 ctx_kwargs["proxy"] = {"server": proxy}
             context = await browser.new_context(**ctx_kwargs)
             await context.add_init_script(STEALTH_JS)
+            if cfg.block_media:
+                async def route(route):
+                    if route.request.resource_type in ("image", "font", "media", "stylesheet"):
+                        await route.abort()
+                    else:
+                        await route.continue_()
+                await context.route("**/*", route)
             page = await context.new_page()
             return Slot(context, page, proxy)
 
-        slots: list[Slot] = []
+        slots: list[Slot | None] = [None] * cfg.count
+        sem = asyncio.Semaphore(cfg.concurrency)
         start = time.time()
 
-        for i in range(1, cfg.count + 1):
-            slot = await new_slot(proxy_for(i - 1))
-            slots.append(slot)
-            try:
-                await load_slot(slot, cfg, i)
-            except Exception as e:
-                print(f"[{i}] erro: {e}")
-            await asyncio.sleep(cfg.connect_delay)
+        async def spawn_one(i: int):
+            async with sem:
+                slot = await new_slot(proxy_for(i))
+                slots[i] = slot
+                ok = False
+                try:
+                    ok = await load_slot(slot, cfg, i + 1)
+                except Exception as e:
+                    print(f"[{i+1}] erro: {e}")
+                if ok:
+                    asyncio.create_task(keep_alive(slot, cfg))
+                await asyncio.sleep(cfg.connect_delay)
 
-        print("\nConectados. Mantendo vivos (Ctrl+C encerra).\n")
+        await asyncio.gather(*(spawn_one(i) for i in range(cfg.count)))
+
+        print("\nSpawn completo. Mantendo vivos (Ctrl+C encerra).\n")
 
         while True:
             for i, s in enumerate(slots):
-                if s.is_closed():
+                if s is not None and s.is_closed():
                     try:
                         await s.context.close()
                     except Exception:
@@ -195,7 +264,8 @@ async def amain(cfg: Config):
                     ns = await new_slot(proxy_for(i))
                     slots[i] = ns
                     try:
-                        await load_slot(ns, cfg, i + 1)
+                        if await load_slot(ns, cfg, i + 1):
+                            asyncio.create_task(keep_alive(ns, cfg))
                     except Exception as e:
                         print(f"[{i+1}] reabertura erro: {e}")
             print(render(cfg, slots, start))
