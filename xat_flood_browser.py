@@ -204,10 +204,10 @@ async def do_action(slot: Slot, cfg: Config):
 
     async def send(frame, sel):
         loc = frame.locator(sel).first
-        await loc.wait_for(state="visible", timeout=800)
-        await loc.click(timeout=800)
+        await loc.wait_for(state="visible", timeout=2500)
+        await loc.click(timeout=2500)
         await loc.type(cfg.msg, delay=25)
-        await loc.press("Enter", timeout=800)
+        await loc.press("Enter", timeout=2500)
 
     # alvo exato primeiro: o campo de mensagem do xat
     for frame in frames:
@@ -387,8 +387,18 @@ async def amain(cfg: Config):
             # 1. entra TODOS do lote de uma vez (paralelo)
             results = await asyncio.gather(*(enter(i) for i in batch))
             entered = [i for i, r in zip(batch, results) if r]
-            # 2. altera TODOS os nomes de uma vez (paralelo) — rapido
-            await asyncio.gather(*(name_one(i) for i in entered))
+            # 2. altera os nomes UM POR UM (sequencial), rapido
+            print(f"    [lote {batch_start // cfg.batch + 1}] "
+                  f"alterando {len(entered)} nomes um por um...")
+            for i in entered:
+                try:
+                    await asyncio.wait_for(settle(slots[i], cfg, i + 1),
+                                           timeout=20)
+                    await asyncio.wait_for(change_name(slots[i], i + 1),
+                                           timeout=20)
+                except Exception as e:
+                    print(f"    [erro lote] slot {i+1}: {e}")
+                asyncio.create_task(keep_alive(slots[i], cfg))
 
         print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
 
