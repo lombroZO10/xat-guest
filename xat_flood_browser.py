@@ -223,33 +223,8 @@ async def do_action(slot: Slot, cfg: Config) -> bool:
     return False
 
 
-async def ensure_joined(slot: Slot, cfg: Config) -> bool:
-    """Se o guest caiu (botao #signIn mostra 'Entrar'), clica pra voltar."""
-    page = slot.page
-    for _ in range(3):
-        for frame in page.frames:
-            try:
-                btn = frame.locator("#signIn").first
-                if not await btn.is_visible():
-                    continue
-                txt = (await btn.inner_text()).strip()
-                low = txt.lower()
-                if "sair" in low:
-                    return False  # conectado
-                # desconectado -> clica pra entrar
-                await btn.click(timeout=2000)
-                print(f"    [rejoin] botao '{txt}' -> clicando pra entrar")
-                await asyncio.sleep(4)
-                return True
-            except Exception:
-                continue
-        await asyncio.sleep(0.5)
-    return False
-
-
 async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
     """Manda a mensagem (acao) que registra o id; espera um instante fixo."""
-    await ensure_joined(slot, cfg)
     print(f"    [{idx}] settle: enviando mensagem...")
     ok = await do_action(slot, cfg)
     await asyncio.sleep(3)
