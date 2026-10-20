@@ -258,8 +258,9 @@ async def change_name(slot: Slot, idx: int):
             for frame in page.frames:
                 try:
                     loc = frame.locator(sel).first
-                    if await loc.is_visible():
-                        await loc.click(timeout=2000)
+                    vis = await asyncio.wait_for(loc.is_visible(), timeout=2)
+                    if vis:
+                        await asyncio.wait_for(loc.click(), timeout=3)
                         return True
                 except Exception:
                     continue
@@ -286,8 +287,9 @@ async def change_name(slot: Slot, idx: int):
         for frame in page.frames:
             try:
                 ta = frame.locator("#nameedit").first
-                if await ta.is_visible():
-                    await ta.click(timeout=2000)
+                vis = await asyncio.wait_for(ta.is_visible(), timeout=2)
+                if vis:
+                    await asyncio.wait_for(ta.click(), timeout=3)
                     await ta.press("Control+A")
                     await ta.press("Backspace")
                     await ta.type(name, delay=20)
@@ -382,7 +384,11 @@ async def amain(cfg: Config):
 
             async def process_one(i: int):
                 if await enter(i):
-                    await change_name(slots[i], i + 1)
+                    try:
+                        await asyncio.wait_for(change_name(slots[i], i + 1),
+                                               timeout=30)
+                    except Exception:
+                        pass
                     asyncio.create_task(keep_alive(slots[i], cfg))
 
             await asyncio.gather(*(process_one(i) for i in batch))
