@@ -54,7 +54,7 @@ if (oq) {
 
 def gen_name(i: int) -> str:
     # guest 1 = "...22!", guest 2 = "...22!!", etc.
-    return "fica Dia 25 e oque? 22" + "!" * (i + 1)
+    return "Dia 25 e oque? 22" + "!" * (i + 1)
 
 
 def stealth_js(name: str) -> str:
