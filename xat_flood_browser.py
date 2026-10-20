@@ -313,10 +313,11 @@ async def change_name(slot: Slot, idx: int):
 
 
 async def quiet_page(slot: Slot) -> bool:
-    """Deixa a aba parada de vez pra economizar CPU:
+    """Deixa a aba leve SEM quebrar a reconexao do chat:
     - congela animacoes e esconde o corpo (para de desenhar)
-    - mata os timers/rAF (maior consumidor de CPU de um chat parado)
-    O WebSocket continua vivo: quem cuida do socket e o processo do browser."""
+    - mata so o requestAnimationFrame (animacao)
+    - MANTEM setTimeout/setInterval: a reconexao/heartbeat do chat depende deles
+    """
     try:
         await slot.page.evaluate("""() => {
             try {
@@ -325,9 +326,6 @@ async def quiet_page(slot: Slot) -> bool:
                     e.style.transition = 'none';
                 });
                 if (document.body) document.body.style.display = 'none';
-                for (let i = 1; i < 200000; i++) { clearTimeout(i); clearInterval(i); }
-                window.setTimeout = () => 0;
-                window.setInterval = () => 0;
                 window.requestAnimationFrame = () => 0;
             } catch (e) {}
         }""")
@@ -456,9 +454,9 @@ async def amain(cfg: Config):
                 except Exception as e:
                     print(f"    [erro nome] slot {i+1}: {type(e).__name__} {e}")
                 if slots[i] is not None:
-                    # espera o save ASSENTAR antes de congelar a aba (matar os
-                    # timers logo depois do clique cancelava o envio do nome)
-                    await asyncio.sleep(3)
+                    # espera o save E a reconexao com o nome novo assentarem
+                    # antes de congelar a aba
+                    await asyncio.sleep(6)
                     if not await quiet_page(slots[i]):
                         asyncio.create_task(keep_alive(slots[i], cfg))
                     else:
