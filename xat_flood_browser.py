@@ -247,11 +247,14 @@ async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
 
 
 async def change_name(slot: Slot, idx: int):
-    """Clica no proprio nome, preenche o nome e salva."""
+    """Clica no proprio nome (reconecta + abre dialog), preenche e salva."""
     page = slot.page
-    frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
+
+    def frames():
+        return [page.main_frame] + [f for f in page.frames if f != page.main_frame]
+
     # 1. clica no primeiro li.friend (nosso nome na lista)
-    for frame in frames:
+    for frame in frames():
         try:
             li = frame.locator("li.friend").first
             await li.wait_for(state="visible", timeout=3000)
@@ -259,39 +262,36 @@ async def change_name(slot: Slot, idx: int):
             break
         except Exception:
             continue
-    # 2. espera o dialog (a reconexao atrasa a abertura), limpa e digita o nome
-    await asyncio.sleep(0.4)
-    for frame in frames:
+
+    # 2. espera a reconexao (ws 1 -> 2); o frame pode recarregar aqui
+    for _ in range(16):  # ate ~8s
+        if slot.ws_count >= 2:
+            break
+        await asyncio.sleep(0.5)
+
+    # 3. re-captura os frames (a reconexao pode ter recarregado o iframe)
+    await asyncio.sleep(0.5)
+    for frame in frames():
         try:
             ta = frame.locator("#nameedit").first
-            await ta.wait_for(state="visible", timeout=10000)
+            await ta.wait_for(state="visible", timeout=8000)
             await ta.click(timeout=2000)
             await ta.press("Control+A")
             await ta.press("Backspace")
             await ta.type(slot.name, delay=20)
-            await ta.press("Tab")  # blur -> dispara o evento change do campo
-            val = await ta.input_value()
-            print(f"    [nome] digitado={val!r}")
+            await ta.press("Tab")  # blur -> dispara o evento change
             break
         except Exception:
             continue
-    # 3. clica no botao Salvar
-    for frame in frames:
+
+    # 4. clica no botao Salvar (re-captura os frames de novo)
+    for frame in frames():
         try:
             btn = frame.locator("[data-localize='mob2.save']").first
             await btn.wait_for(state="visible", timeout=5000)
             await btn.click(timeout=2000)
-            break
-        except Exception:
-            continue
-    # 4. verifica o nome que ficou na lista
-    await asyncio.sleep(0.5)
-    for frame in frames:
-        try:
-            nick = frame.locator("li.friend .userNick").first
-            txt = (await nick.inner_text()).strip()
-            print(f"    [nome] lista={txt!r}")
-            break
+            print(f"    [nome] {slot.name}")
+            return
         except Exception:
             continue
 
