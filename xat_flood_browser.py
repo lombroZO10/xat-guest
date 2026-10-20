@@ -34,6 +34,7 @@ class Config:
     keepalive: float = 45.0          # segundos entre "acoes" (abaixo do idle kick)
     msg: str = "oi"
     block_media: bool = True         # bloqueia imagem/fonte/midia (economiza proxy)
+    block_css: bool = False          # bloqueia CSS tambem (mais economia, risco)
 
 
 STEALTH_JS = """
@@ -97,6 +98,8 @@ def parse_args(argv) -> Config:
     ap.add_argument("--msg", default="oi", help="mensagem da acao")
     ap.add_argument("--no-block-media", action="store_true",
                     help="nao bloquear imagem/fonte/midia (consome mais proxy)")
+    ap.add_argument("--block-css", action="store_true",
+                    help="bloqueia CSS tambem (economiza mais; teste antes)")
     args = ap.parse_args(argv)
 
     proxies = []
@@ -117,7 +120,7 @@ def parse_args(argv) -> Config:
                   headless=not args.headed, connect_delay=args.connect_delay,
                   challenge_wait=args.challenge_wait, concurrency=args.concurrency,
                   keepalive=args.keepalive, msg=args.msg,
-                  block_media=not args.no_block_media)
+                  block_media=not args.no_block_media, block_css=args.block_css)
 
 
 class Slot:
@@ -255,12 +258,15 @@ async def amain(cfg: Config):
                 ctx_kwargs["proxy"] = {"server": proxy}
             context = await browser.new_context(**ctx_kwargs)
             await context.add_init_script(stealth_js(name))
-            if cfg.block_media:
+            if cfg.block_media or cfg.block_css:
                 async def route(route):
                     u = route.request.url
-                    if route.request.resource_type in ("image", "font", "media"):
+                    rt = route.request.resource_type
+                    if cfg.block_media and rt in ("image", "font", "media"):
                         await route.abort()
-                    elif any(h in u for h in TRACKER_HOSTS):
+                    elif cfg.block_media and any(h in u for h in TRACKER_HOSTS):
+                        await route.abort()
+                    elif cfg.block_css and rt == "stylesheet":
                         await route.abort()
                     else:
                         await route.continue_()
