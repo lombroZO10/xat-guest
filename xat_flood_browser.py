@@ -267,20 +267,11 @@ async def change_name(slot: Slot, idx: int):
             await asyncio.sleep(0.3)
         return False
 
-    # 1. clica no primeiro li.friend -> dispara a reconexao (registra o id)
+    # 1. clica no primeiro li.friend (abre o dialog; o id ja veio do settle)
     if not await find_click("li.friend", 8):
         return
 
-    # 2. espera a reconexao (ws 1 -> 2); o iframe recarrega aqui e fecha o dialog
-    for _ in range(16):  # ate ~8s
-        if slot.ws_count >= 2:
-            break
-        await asyncio.sleep(0.5)
-
-    # 3. clica no nome DE NOVO -> agora abre o dialog (guest ja registrado)
-    await find_click("li.friend", 8)
-
-    # 4. digita o nome no #nameedit (polling, tolera recarga de frame)
+    # 2. digita o nome no #nameedit (polling, tolera recarga de frame)
     filled = False
     deadline = time.time() + 12
     while time.time() < deadline and not filled:
@@ -376,22 +367,26 @@ async def amain(cfg: Config):
                 print(f"[{i+1}] erro: {e}")
                 return False
 
-        # processa em lotes: cada conexao, ASSIM QUE ENTRA, ja troca o nome na hora
-        # (nao espera o lote inteiro entrar). O clique no nome reconecta + abre dialog.
-        for batch_start in range(0, cfg.count, cfg.batch):
-            batch = list(range(batch_start, min(batch_start + cfg.batch, cfg.count)))
-            print(f"\n=== lote {batch_start // cfg.batch + 1}: {len(batch)} conexoes ===\n")
+        # entra em paralelo (concurrency limita o pico), depois settle+nome com
+        # fila curta (a reconexao do settle e o ponto de rate limit).
+        enter_sem = asyncio.Semaphore(cfg.concurrency)
+        settle_sem = asyncio.Semaphore(3)
 
-            async def process_one(i: int):
-                if await enter(i):
+        async def process_one(i: int):
+            async with enter_sem:
+                ok = await enter(i)
+            if ok:
+                async with settle_sem:
                     try:
+                        await asyncio.wait_for(settle(slots[i], cfg, i + 1),
+                                               timeout=20)
                         await asyncio.wait_for(change_name(slots[i], i + 1),
-                                               timeout=30)
+                                               timeout=20)
                     except Exception:
                         pass
-                    asyncio.create_task(keep_alive(slots[i], cfg))
+                asyncio.create_task(keep_alive(slots[i], cfg))
 
-            await asyncio.gather(*(process_one(i) for i in batch))
+        await asyncio.gather(*(process_one(i) for i in range(cfg.count)))
 
         print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
 
@@ -406,6 +401,7 @@ async def amain(cfg: Config):
                     slots[i] = ns
                     try:
                         if await load_slot(ns, cfg, i + 1):
+                            await settle(ns, cfg, i + 1)
                             await change_name(ns, i + 1)
                             asyncio.create_task(keep_alive(ns, cfg))
                     except Exception as e:
