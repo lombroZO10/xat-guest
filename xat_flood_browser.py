@@ -211,8 +211,8 @@ async def do_action(slot: Slot, cfg: Config) -> bool:
                     vis = await asyncio.wait_for(loc.is_visible(), timeout=1)
                     if vis:
                         await asyncio.wait_for(loc.click(), timeout=2)
-                        await loc.type(cfg.msg, delay=25)
-                        await loc.press("Enter")
+                        await asyncio.wait_for(loc.type(cfg.msg, delay=25), timeout=6)
+                        await asyncio.wait_for(loc.press("Enter"), timeout=3)
                         slot.actions += 1
                         if slot.actions == 1:
                             print(f"    [acao ok] frame={frame.url[:45]} sel={sel}")
@@ -269,10 +269,10 @@ async def change_name(slot: Slot, idx: int):
                 vis = await asyncio.wait_for(ta.is_visible(), timeout=2)
                 if vis:
                     await asyncio.wait_for(ta.click(), timeout=3)
-                    await ta.press("Control+A")
-                    await ta.press("Backspace")
-                    await ta.type(name, delay=20)
-                    await ta.press("Tab")  # blur -> dispara o evento change
+                    await asyncio.wait_for(ta.press("Control+A"), timeout=2)
+                    await asyncio.wait_for(ta.press("Backspace"), timeout=2)
+                    await asyncio.wait_for(ta.type(name, delay=20), timeout=8)
+                    await asyncio.wait_for(ta.press("Tab"), timeout=2)
                     filled = True
                     break
             except Exception:
