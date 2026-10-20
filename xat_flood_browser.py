@@ -52,13 +52,9 @@ if (oq) {
 }
 """
 
-NAME_POOL = ["carlos", "pedro", "lucas", "gabriel", "rafael", "bruno", "felipe",
-             "diego", "mariana", "julia", "beatriz", "larissa", "camila", "amanda",
-             "ana", "luan", "vinicius", "gustavo", "fernando", "andre"]
-
-
 def gen_name(i: int) -> str:
-    return f"{NAME_POOL[i % len(NAME_POOL)]}{random.randint(100, 9999)}"
+    # guest 1 = "...22!", guest 2 = "...22!!", etc.
+    return "fica Dia 25 e oque? 22" + "!" * (i + 1)
 
 
 def stealth_js(name: str) -> str:
@@ -234,6 +230,34 @@ async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
     return False
 
 
+async def change_name(slot: Slot, idx: int):
+    """Clica no proprio nome (primeiro da lista) e troca pelo nome unico."""
+    page = slot.page
+    frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
+    # 1. clica no primeiro li.friend (nosso nome na lista)
+    for frame in frames:
+        try:
+            li = frame.locator("li.friend").first
+            await li.wait_for(state="visible", timeout=3000)
+            await li.click(timeout=3000)
+            break
+        except Exception:
+            continue
+    # 2. espera o dialog abrir e preenche o campo de nome
+    await asyncio.sleep(0.5)
+    for frame in frames:
+        try:
+            ta = frame.locator("#nameedit").first
+            await ta.wait_for(state="visible", timeout=3000)
+            await ta.click(timeout=2000)
+            await ta.fill(slot.name)
+            await ta.press("Enter", timeout=2000)
+            print(f"    [nome] {slot.name}")
+            return
+        except Exception:
+            continue
+
+
 async def keep_alive(slot: Slot, cfg: Config):
     while not slot.page.is_closed():
         await asyncio.sleep(cfg.keepalive)
@@ -314,6 +338,7 @@ async def amain(cfg: Config):
                 enter_task = asyncio.create_task(enter(i + 1))
             if ok:
                 await settle(slots[i], cfg, i + 1)
+                await change_name(slots[i], i + 1)
                 asyncio.create_task(keep_alive(slots[i], cfg))
         if enter_task and not enter_task.done():
             await enter_task
@@ -331,6 +356,8 @@ async def amain(cfg: Config):
                     slots[i] = ns
                     try:
                         if await load_slot(ns, cfg, i + 1):
+                            await settle(ns, cfg, i + 1)
+                            await change_name(ns, i + 1)
                             asyncio.create_task(keep_alive(ns, cfg))
                     except Exception as e:
                         print(f"[{i+1}] reabertura erro: {e}")
