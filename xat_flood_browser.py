@@ -231,7 +231,7 @@ async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
 
 
 async def change_name(slot: Slot, idx: int):
-    """Clica no proprio nome (primeiro da lista) e troca pelo nome unico."""
+    """Clica no proprio nome, preenche o nome e salva."""
     page = slot.page
     frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
     # 1. clica no primeiro li.friend (nosso nome na lista)
@@ -243,7 +243,7 @@ async def change_name(slot: Slot, idx: int):
             break
         except Exception:
             continue
-    # 2. espera o dialog abrir e preenche o campo de nome
+    # 2. espera o dialog e preenche o campo de nome
     await asyncio.sleep(0.5)
     for frame in frames:
         try:
@@ -251,7 +251,15 @@ async def change_name(slot: Slot, idx: int):
             await ta.wait_for(state="visible", timeout=3000)
             await ta.click(timeout=2000)
             await ta.fill(slot.name)
-            await ta.press("Enter", timeout=2000)
+            break
+        except Exception:
+            continue
+    # 3. clica no botao Salvar
+    for frame in frames:
+        try:
+            btn = frame.locator("[data-localize='mob2.save']").first
+            await btn.wait_for(state="visible", timeout=3000)
+            await btn.click(timeout=2000)
             print(f"    [nome] {slot.name}")
             return
         except Exception:
