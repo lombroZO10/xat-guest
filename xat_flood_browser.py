@@ -377,20 +377,39 @@ async def amain(cfg: Config):
 
             # FASE 2: acao em cada um pra registrar o id (todos primeiro)
             print(f"    [lote {n_lote}] registrando id de {len(entered)} guests...")
+            ok_ids = []
             for i in entered:
                 try:
-                    await settle(slots[i], cfg, i + 1)
+                    await asyncio.wait_for(settle(slots[i], cfg, i + 1),
+                                           timeout=15)
+                    ok_ids.append(i)
+                except asyncio.TimeoutError:
+                    print(f"    [timeout] slot {i+1} travou no id, descartando")
+                    try:
+                        await slots[i].context.close()
+                    except Exception:
+                        pass
+                    slots[i] = None
                 except Exception as e:
                     print(f"    [erro id] slot {i+1}: {type(e).__name__} {e}")
 
-            # FASE 3: so agora troca o nome (todos ja com id)
-            print(f"    [lote {n_lote}] alterando nomes de {len(entered)} guests...")
-            for i in entered:
+            # FASE 3: so agora troca o nome (nos que pegaram id)
+            print(f"    [lote {n_lote}] alterando nomes de {len(ok_ids)} guests...")
+            for i in ok_ids:
                 try:
-                    await change_name(slots[i], i + 1)
+                    await asyncio.wait_for(change_name(slots[i], i + 1),
+                                           timeout=25)
+                except asyncio.TimeoutError:
+                    print(f"    [timeout] slot {i+1} travou no nome, descartando")
+                    try:
+                        await slots[i].context.close()
+                    except Exception:
+                        pass
+                    slots[i] = None
                 except Exception as e:
                     print(f"    [erro nome] slot {i+1}: {type(e).__name__} {e}")
-                asyncio.create_task(keep_alive(slots[i], cfg))
+                if slots[i] is not None:
+                    asyncio.create_task(keep_alive(slots[i], cfg))
 
         print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
 
