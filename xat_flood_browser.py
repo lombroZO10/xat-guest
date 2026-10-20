@@ -188,17 +188,32 @@ async def load_slot(slot: Slot, cfg: Config, idx: int) -> bool:
 async def do_action(slot: Slot, cfg: Config):
     """Envia uma mensagem no chat = a 'acao' que segura o guest vivo."""
     page = slot.page
-    sel_priority = ["#sendmsg", "#sendMsg", "[contenteditable='true']",
-                    "textarea", "[role='textbox']"]
     frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
+
+    async def send(frame, sel):
+        loc = frame.locator(sel).first
+        await loc.wait_for(state="visible", timeout=800)
+        await loc.click(timeout=800)
+        await loc.type(cfg.msg, delay=25)
+        await loc.press("Enter", timeout=800)
+
+    # alvo exato primeiro: o campo de mensagem do xat
     for frame in frames:
-        for sel in sel_priority:
+        try:
+            await send(frame, "#textEntryEditable")
+            slot.actions += 1
+            if slot.actions == 1:
+                print(f"    [acao ok] frame={frame.url[:45]} sel=#textEntryEditable")
+            return
+        except Exception:
+            continue
+
+    # fallback: outros seletores (se o id mudar)
+    for frame in frames:
+        for sel in ("#sendmsg", "#sendMsg", "[contenteditable='true']",
+                    "[role='textbox']"):
             try:
-                loc = frame.locator(sel).first
-                await loc.wait_for(state="visible", timeout=1200)
-                await loc.click(timeout=1200)
-                await loc.type(cfg.msg, delay=25)
-                await loc.press("Enter", timeout=1200)
+                await send(frame, sel)
                 slot.actions += 1
                 if slot.actions == 1:
                     print(f"    [acao ok] frame={frame.url[:45]} sel={sel}")
