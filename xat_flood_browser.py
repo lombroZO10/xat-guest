@@ -209,10 +209,10 @@ async def do_action(slot: Slot, cfg: Config):
 
 
 async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
-    """Faz a acao e espera a reconexao (registro do id). Tenta ate 3x."""
-    for attempt in range(3):
+    """Faz a acao e espera a reconexao (registro do id). Tenta ate 2x rapido."""
+    for _ in range(2):
         await do_action(slot, cfg)
-        for _ in range(10):  # ate ~10s esperando a reconexao
+        for _ in range(6):  # ate ~6s esperando a reconexao
             if slot.ws_count >= 2:
                 print(f"    [{idx}] id registrado")
                 return True
@@ -281,36 +281,28 @@ async def amain(cfg: Config):
         slots: list[Slot | None] = [None] * cfg.count
         start = time.time()
 
-        # fase 1: carrega tudo em paralelo (concurrency limita o pico de CPU/RAM)
-        load_sem = asyncio.Semaphore(cfg.concurrency)
+        async def enter(i: int) -> bool:
+            slot = await new_slot(proxy_for(i), gen_name(i))
+            slots[i] = slot
+            try:
+                return await load_slot(slot, cfg, i + 1)
+            except Exception as e:
+                print(f"[{i+1}] erro: {e}")
+                return False
 
-        async def load_one(i: int):
-            async with load_sem:
-                slot = await new_slot(proxy_for(i), gen_name(i))
-                slots[i] = slot
-                try:
-                    return await load_slot(slot, cfg, i + 1)
-                except Exception as e:
-                    print(f"[{i+1}] erro: {e}")
-                    return False
-
-        results = await asyncio.gather(*(load_one(i) for i in range(cfg.count)))
-
-        print("\nCarga completa. Assentando (reconexao) em fila limitada...\n")
-
-        # fase 2: assenta com fila curta — a reconexao e o ponto de rate limit
-        settle_sem = asyncio.Semaphore(cfg.settle_concurrency)
-
-        async def settle_one(i: int):
-            s = slots[i]
-            if s is None or s.page.is_closed():
-                return
-            async with settle_sem:
-                await settle(s, cfg, i + 1)
-                asyncio.create_task(keep_alive(s, cfg))
-
-        await asyncio.gather(*(settle_one(i) for i in range(cfg.count)
-                               if results[i]))
+        # pipeline: o proximo ENTRA enquanto o atual assenta.
+        # a reconexao continua 1 por vez (sem rate limit), mas a carga
+        # (Cloudflare + pagina) e sobreposta com o assentamento do anterior.
+        enter_task = asyncio.create_task(enter(0))
+        for i in range(cfg.count):
+            ok = await enter_task
+            if i + 1 < cfg.count:
+                enter_task = asyncio.create_task(enter(i + 1))
+            if ok:
+                await settle(slots[i], cfg, i + 1)
+                asyncio.create_task(keep_alive(slots[i], cfg))
+        if enter_task and not enter_task.done():
+            await enter_task
 
         print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
 
