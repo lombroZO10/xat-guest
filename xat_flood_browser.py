@@ -249,51 +249,56 @@ async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
 async def change_name(slot: Slot, idx: int):
     """Clica no proprio nome (reconecta + abre dialog), preenche e salva."""
     page = slot.page
+    name = slot.name
 
-    def frames():
-        return [page.main_frame] + [f for f in page.frames if f != page.main_frame]
+    async def find_click(sel: str, timeout: float) -> bool:
+        """Polling nao-bloqueante: evita travar se o iframe recarregar."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for frame in page.frames:
+                try:
+                    loc = frame.locator(sel).first
+                    if await loc.is_visible():
+                        await loc.click(timeout=2000)
+                        return True
+                except Exception:
+                    continue
+            await asyncio.sleep(0.3)
+        return False
 
     # 1. clica no primeiro li.friend (nosso nome na lista)
-    for frame in frames():
-        try:
-            li = frame.locator("li.friend").first
-            await li.wait_for(state="visible", timeout=3000)
-            await li.click(timeout=3000)
-            break
-        except Exception:
-            continue
+    if not await find_click("li.friend", 8):
+        return
 
-    # 2. espera a reconexao (ws 1 -> 2); o frame pode recarregar aqui
+    # 2. espera a reconexao (ws 1 -> 2); o iframe recarrega aqui
     for _ in range(16):  # ate ~8s
         if slot.ws_count >= 2:
             break
         await asyncio.sleep(0.5)
 
-    # 3. re-captura os frames (a reconexao pode ter recarregado o iframe)
-    await asyncio.sleep(0.5)
-    for frame in frames():
-        try:
-            ta = frame.locator("#nameedit").first
-            await ta.wait_for(state="visible", timeout=8000)
-            await ta.click(timeout=2000)
-            await ta.press("Control+A")
-            await ta.press("Backspace")
-            await ta.type(slot.name, delay=20)
-            await ta.press("Tab")  # blur -> dispara o evento change
-            break
-        except Exception:
-            continue
+    # 3. digita o nome no #nameedit (polling, tolera recarga de frame)
+    filled = False
+    deadline = time.time() + 12
+    while time.time() < deadline and not filled:
+        for frame in page.frames:
+            try:
+                ta = frame.locator("#nameedit").first
+                if await ta.is_visible():
+                    await ta.click(timeout=2000)
+                    await ta.press("Control+A")
+                    await ta.press("Backspace")
+                    await ta.type(name, delay=20)
+                    await ta.press("Tab")  # blur -> dispara o evento change
+                    filled = True
+                    break
+            except Exception:
+                continue
+        if not filled:
+            await asyncio.sleep(0.3)
 
-    # 4. clica no botao Salvar (re-captura os frames de novo)
-    for frame in frames():
-        try:
-            btn = frame.locator("[data-localize='mob2.save']").first
-            await btn.wait_for(state="visible", timeout=5000)
-            await btn.click(timeout=2000)
-            print(f"    [nome] {slot.name}")
-            return
-        except Exception:
-            continue
+    # 4. clica no botao Salvar
+    await find_click("[data-localize='mob2.save']", 8)
+    print(f"    [nome] {name}")
 
 
 async def keep_alive(slot: Slot, cfg: Config):
