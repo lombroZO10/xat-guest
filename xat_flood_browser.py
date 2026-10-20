@@ -28,7 +28,7 @@ class Config:
     headless: bool = True
     connect_delay: float = 1.0
     url_timeout: int = 60_000
-    challenge_wait: float = 45.0
+    challenge_wait: float = 25.0
     viewport: tuple = (700, 520)     # menor = menos CPU
     concurrency: int = 8             # abas simultaneas no spawn
     settle_concurrency: int = 2      # reconnects simultaneos (ponto de rate limit)
@@ -88,7 +88,7 @@ def parse_args(argv) -> Config:
                     help="arquivo JSON (chave 'endpoints') ou TXT (um por linha)")
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--connect-delay", type=float, default=1.0)
-    ap.add_argument("--challenge-wait", type=float, default=45.0)
+    ap.add_argument("--challenge-wait", type=float, default=25.0)
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--settle-concurrency", type=int, default=2,
                     help="reconnects simultaneos no assentamento (subir com cuidado)")
@@ -161,16 +161,29 @@ async def load_slot(slot: Slot, cfg: Config, idx: int) -> bool:
                 print(f"    [{idx}] reconectou (id registrado)")
 
     page.on("websocket", on_ws)
-    await page.goto(
-        f"https://xat.com/content/web/R00253/box/embed.html?n={cfg.room}",
-        wait_until="domcontentloaded", timeout=cfg.url_timeout)
+    try:
+        await page.goto(
+            f"https://xat.com/content/web/R00253/box/embed.html?n={cfg.room}",
+            wait_until="domcontentloaded", timeout=cfg.url_timeout)
+    except Exception:
+        return False
 
     t0 = time.time()
+    cf_since = None
     while time.time() - t0 < cfg.challenge_wait:
         if slot.ws_count > 0:
             print(f"[{idx}] ENTROU (ws xat, proxy={slot.proxy or 'direto'}) "
                   f"em {int(time.time()-t0)}s")
             return True
+        # cloudflare travado -> desiste rapido e parte pra proxima sessao
+        if "__cf_chl" in page.url:
+            if cf_since is None:
+                cf_since = time.time()
+            elif time.time() - cf_since > 12:
+                print(f"[{idx}] cloudflare travado, pulando (proxy={slot.proxy or 'direto'})")
+                return False
+        else:
+            cf_since = None
         await asyncio.sleep(1.0)
 
     url = page.url
@@ -244,7 +257,7 @@ async def change_name(slot: Slot, idx: int):
         except Exception:
             continue
     # 2. espera o dialog, limpa e digita o nome (teclado real)
-    await asyncio.sleep(0.8)
+    await asyncio.sleep(0.4)
     for frame in frames:
         try:
             ta = frame.locator("#nameedit").first
@@ -269,7 +282,7 @@ async def change_name(slot: Slot, idx: int):
         except Exception:
             continue
     # 4. verifica o nome que ficou na lista
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.5)
     for frame in frames:
         try:
             nick = frame.locator("li.friend .userNick").first
