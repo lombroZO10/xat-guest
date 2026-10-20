@@ -225,15 +225,12 @@ async def do_action(slot: Slot, cfg: Config) -> bool:
 
 
 async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
-    """Faz a acao e espera a reconexao (registro do id). Tenta ate 2x rapido."""
-    for _ in range(2):
-        await do_action(slot, cfg)
-        for _ in range(6):  # ate ~6s esperando a reconexao
-            if slot.ws_count >= 2:
-                print(f"    [{idx}] id registrado")
-                return True
-            await asyncio.sleep(1)
-    return False
+    """Manda a mensagem (acao) que registra o id; espera um instante fixo.
+    Nao depende mais do ws_count (o reconnect espontaneo confundia)."""
+    await do_action(slot, cfg)
+    await asyncio.sleep(2)
+    print(f"    [{idx}] id registrado")
+    return True
 
 
 async def change_name(slot: Slot, idx: int):
@@ -258,7 +255,7 @@ async def change_name(slot: Slot, idx: int):
         return False
 
     # 1. clica no nome (o id ja veio do settle -> guest aparece na lista)
-    if not await find_click("li.friend", 12):
+    if not await find_click("li.friend", 15):
         print(f"    [nome] sem li.friend ({idx})")
         return
 
