@@ -267,18 +267,10 @@ async def change_name(slot: Slot, idx: int):
             await asyncio.sleep(0.3)
         return False
 
-    # 1. clica no nome -> dispara a reconexao (registra o id)
-    if not await find_click("li.friend", 8):
+    # 1. clica no nome (o id ja veio do settle -> guest aparece na lista)
+    if not await find_click("li.friend", 12):
+        print(f"    [nome] sem li.friend ({idx})")
         return
-
-    # 1b. espera a reconexao (ws 1 -> 2); o iframe recarrega e fecha o dialog
-    for _ in range(12):  # ate ~6s
-        if slot.ws_count >= 2:
-            break
-        await asyncio.sleep(0.5)
-
-    # 1c. clica de novo -> abre o dialog (guest ja registrado)
-    await find_click("li.friend", 8)
 
     # 2. digita o nome no #nameedit (polling, tolera recarga de frame)
     filled = False
@@ -380,7 +372,10 @@ async def amain(cfg: Config):
         # lote estiverem com o nome, entra o proximo lote.
         async def name_one(i: int):
             try:
-                await asyncio.wait_for(change_name(slots[i], i + 1), timeout=25)
+                # settle = manda mensagem -> reconecta -> registra o id
+                await asyncio.wait_for(settle(slots[i], cfg, i + 1), timeout=20)
+                # com o id registrado, o guest ja aparece na lista e o nome cola
+                await asyncio.wait_for(change_name(slots[i], i + 1), timeout=20)
             except Exception:
                 pass
             asyncio.create_task(keep_alive(slots[i], cfg))
