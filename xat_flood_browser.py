@@ -66,6 +66,11 @@ def stealth_js(name: str) -> str:
     return STEALTH_JS + "\n" + inject
 
 
+TRACKER_HOSTS = ("google-analytics", "googletagmanager", "doubleclick",
+                 "googlesyndication", "facebook.com/tr", "hotjar",
+                 "mixpanel", "amplitude", "sentry.io")
+
+
 def _norm_proxy(p: str) -> str:
     p = p.strip()
     if p and "://" not in p:
@@ -196,12 +201,22 @@ async def do_action(slot: Slot, cfg: Config):
                 continue
 
 
-async def keep_alive(slot: Slot, cfg: Config):
-    # primeira acao com atraso aleatorio: nao reconecta 8 de uma vez
-    await asyncio.sleep(random.uniform(10, 30))
-    while not slot.page.is_closed():
+async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
+    """Faz a acao e espera a reconexao (registro do id). Tenta ate 3x."""
+    for attempt in range(3):
         await do_action(slot, cfg)
+        for _ in range(10):  # ate ~10s esperando a reconexao
+            if slot.ws_count >= 2:
+                print(f"    [{idx}] id registrado")
+                return True
+            await asyncio.sleep(1)
+    return False
+
+
+async def keep_alive(slot: Slot, cfg: Config):
+    while not slot.page.is_closed():
         await asyncio.sleep(cfg.keepalive)
+        await do_action(slot, cfg)
 
 
 def render(cfg: Config, slots: list, start: float) -> str:
@@ -242,7 +257,10 @@ async def amain(cfg: Config):
             await context.add_init_script(stealth_js(name))
             if cfg.block_media:
                 async def route(route):
+                    u = route.request.url
                     if route.request.resource_type in ("image", "font", "media"):
+                        await route.abort()
+                    elif any(h in u for h in TRACKER_HOSTS):
                         await route.abort()
                     else:
                         await route.continue_()
@@ -251,23 +269,24 @@ async def amain(cfg: Config):
             return Slot(context, page, proxy, name)
 
         slots: list[Slot | None] = [None] * cfg.count
-        sem = asyncio.Semaphore(cfg.concurrency)
         start = time.time()
 
         async def spawn_one(i: int):
-            async with sem:
-                slot = await new_slot(proxy_for(i), gen_name(i))
-                slots[i] = slot
-                ok = False
-                try:
-                    ok = await load_slot(slot, cfg, i + 1)
-                except Exception as e:
-                    print(f"[{i+1}] erro: {e}")
+            slot = await new_slot(proxy_for(i), gen_name(i))
+            slots[i] = slot
+            try:
+                ok = await load_slot(slot, cfg, i + 1)
                 if ok:
+                    # registra o id e assenta ANTES de ir pro proximo
+                    await settle(slot, cfg, i + 1)
                     asyncio.create_task(keep_alive(slot, cfg))
-                await asyncio.sleep(cfg.connect_delay)
+            except Exception as e:
+                print(f"[{i+1}] erro: {e}")
 
-        await asyncio.gather(*(spawn_one(i) for i in range(cfg.count)))
+        # sequencial: um entra, pega o id, fica; so entao parte pro proximo
+        for i in range(cfg.count):
+            await spawn_one(i)
+            await asyncio.sleep(cfg.connect_delay)
 
         print("\nSpawn completo. Mantendo vivos (Ctrl+C encerra).\n")
 
