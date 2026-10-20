@@ -366,19 +366,18 @@ async def amain(cfg: Config):
                 print(f"[{i+1}] erro: {e}")
                 return False
 
-        # processa em lotes: entra N juntos, troca o nome de todos, proximo lote.
-        # o clique no nome ja desconecta+reconecta (registra o id) e abre o dialog.
+        # processa em lotes: cada conexao, ASSIM QUE ENTRA, ja troca o nome na hora
+        # (nao espera o lote inteiro entrar). O clique no nome reconecta + abre dialog.
         for batch_start in range(0, cfg.count, cfg.batch):
             batch = list(range(batch_start, min(batch_start + cfg.batch, cfg.count)))
             print(f"\n=== lote {batch_start // cfg.batch + 1}: {len(batch)} conexoes ===\n")
-            results = await asyncio.gather(*(enter(i) for i in batch))
-            ok = [i for i, r in zip(batch, results) if r]
 
-            async def name_one(i: int):
-                await change_name(slots[i], i + 1)
-                asyncio.create_task(keep_alive(slots[i], cfg))
+            async def process_one(i: int):
+                if await enter(i):
+                    await change_name(slots[i], i + 1)
+                    asyncio.create_task(keep_alive(slots[i], cfg))
 
-            await asyncio.gather(*(name_one(i) for i in ok))
+            await asyncio.gather(*(process_one(i) for i in batch))
 
         print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
 
