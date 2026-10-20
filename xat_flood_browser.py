@@ -33,7 +33,7 @@ class Config:
     concurrency: int = 8             # abas simultaneas no spawn
     settle_concurrency: int = 2      # reconnects simultaneos (ponto de rate limit)
     keepalive: float = 45.0          # segundos entre "acoes" (abaixo do idle kick)
-    msg: str = "oi"
+    msg: str = "Dia 25 e oque? e 22 Flavioooo!"
     block_media: bool = True         # bloqueia imagem/fonte/midia (economiza proxy)
     block_css: bool = False          # bloqueia CSS tambem (mais economia, risco)
 
