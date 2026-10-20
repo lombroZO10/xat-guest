@@ -251,90 +251,56 @@ async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
 
 
 async def change_name(slot: Slot, idx: int):
-    """Troca o nome via JS puro: sem locator/wait, nao pendura em frame."""
+    """Troca o nome: clique real no li.friend -> dialog -> #nameedit -> Salvar.
+    Playwright de verdade (o el.click() do JS nao abre o dialog do xat)."""
     page = slot.page
     name = slot.name
 
-    FIND = """(sel) => {
-        const findIn = (doc) => doc.querySelector(sel);
-        let el = findIn(document);
-        if (!el) {
-            for (const f of document.querySelectorAll('iframe')) {
-                try {
-                    const d = f.contentDocument;
-                    if (d) { el = findIn(d); if (el) break; }
-                } catch (e) {}
-            }
-        }
-        return el;
-    }"""
+    async def find_click(sel: str, rounds: int) -> bool:
+        for _ in range(rounds):
+            frames = [f for f in page.frames if f != page.main_frame]
+            frames.append(page.main_frame)
+            for frame in frames:
+                try:
+                    loc = frame.locator(sel).first
+                    await loc.wait_for(state="visible", timeout=900)
+                    await loc.click(timeout=900)
+                    return True
+                except Exception:
+                    continue
+            await asyncio.sleep(0.3)
+        return False
 
-    # 1. clica no primeiro li.friend (nosso nome na lista -> abre o dialog)
-    clicked = False
-    for _ in range(10):
-        try:
-            clicked = await page.evaluate(
-                f"""() => {{
-                    const el = ({FIND})('li.friend');
-                    if (!el) return false;
-                    el.click();
-                    return true;
-                }}""")
-        except Exception:
-            clicked = False
-        if clicked:
-            break
-        await asyncio.sleep(0.4)
-
-    if not clicked:
+    # 1. clica no nome (abre o dialog)
+    if not await find_click("li.friend", 10):
         print(f"    [nome] sem li.friend ({idx})")
         return
 
-    # 2. preenche o #nameedit (textarea) e dispara os eventos
-    await asyncio.sleep(0.4)
+    # 2. preenche o #nameedit
     filled = False
     for _ in range(10):
-        try:
-            filled = await page.evaluate(
-                f"""() => {{
-                    const el = ({FIND})('#nameedit');
-                    if (!el) return false;
-                    el.focus();
-                    try {{ el.select(); }} catch (e) {{}}
-                    el.value = {name!r};
-                    el.dispatchEvent(new Event('input', {{bubbles: true}}));
-                    el.dispatchEvent(new Event('change', {{bubbles: true}}));
-                    el.blur();
-                    return true;
-                }}""")
-        except Exception:
-            filled = False
+        frames = [f for f in page.frames if f != page.main_frame]
+        frames.append(page.main_frame)
+        for frame in frames:
+            try:
+                ta = frame.locator("#nameedit").first
+                await ta.wait_for(state="visible", timeout=900)
+                await ta.click(timeout=900)
+                await ta.press("Control+A", timeout=800)
+                await ta.press("Backspace", timeout=800)
+                await ta.type(name, delay=15, timeout=3000)
+                await ta.press("Tab", timeout=800)
+                filled = True
+                break
+            except Exception:
+                continue
         if filled:
             break
-        await asyncio.sleep(0.4)
-
-    if not filled:
-        print(f"    [nome] sem nameedit ({idx})")
-        return
+        await asyncio.sleep(0.3)
 
     # 3. clica em Salvar
-    await asyncio.sleep(0.3)
-    for _ in range(10):
-        try:
-            saved = await page.evaluate(
-                f"""() => {{
-                    const el = ({FIND})("[data-localize='mob2.save']");
-                    if (!el) return false;
-                    el.click();
-                    return true;
-                }}""")
-        except Exception:
-            saved = False
-        if saved:
-            break
-        await asyncio.sleep(0.4)
-
-    print(f"    [nome] {name}" + ("" if saved else " (sem salvar)"))
+    await find_click("[data-localize='mob2.save']", 10)
+    print(f"    [nome] {name}")
 
 
 async def quiet_page(slot: Slot) -> bool:
