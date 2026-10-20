@@ -377,34 +377,37 @@ async def amain(cfg: Config):
                 print(f"[{i+1}] erro: {e}")
                 return False
 
-        # lotes estritos: entra TODOS do lote de uma vez; so quando todos do
-        # lote estiverem com o nome, entra o proximo lote.
-        async def name_one(i: int):
-            try:
-                # settle = manda mensagem -> reconecta -> registra o id
-                await asyncio.wait_for(settle(slots[i], cfg, i + 1), timeout=20)
-                # com o id registrado, o guest ja aparece na lista e o nome cola
-                await asyncio.wait_for(change_name(slots[i], i + 1), timeout=20)
-            except Exception:
-                pass
-            asyncio.create_task(keep_alive(slots[i], cfg))
-
+        # LOTE EM 3 FASES (como pedido):
+        #   1) entram os N de uma vez
+        #   2) da a acao em cada um pra registrar o id (todos primeiro)
+        #   3) so quando TODOS tem id, troca os nomes
+        #   depois parte pro proximo lote.
         for batch_start in range(0, cfg.count, cfg.batch):
             batch = list(range(batch_start, min(batch_start + cfg.batch, cfg.count)))
-            print(f"\n=== lote {batch_start // cfg.batch + 1}: "
-                  f"{len(batch)} conexoes ===\n")
-            # 1. entra TODOS do lote de uma vez (paralelo)
+            n_lote = batch_start // cfg.batch + 1
+            print(f"\n=== lote {n_lote}: {len(batch)} conexoes ===\n")
+
+            # FASE 1: entra TODOS do lote de uma vez (paralelo)
             results = await asyncio.gather(*(enter(i) for i in batch))
             entered = [i for i, r in zip(batch, results) if r]
-            # 2. altera os nomes UM POR UM (sequencial), rapido
-            print(f"    [lote {batch_start // cfg.batch + 1}] "
-                  f"alterando {len(entered)} nomes um por um...")
+            if not entered:
+                continue
+
+            # FASE 2: acao em cada um pra registrar o id (todos primeiro)
+            print(f"    [lote {n_lote}] registrando id de {len(entered)} guests...")
             for i in entered:
                 try:
                     await settle(slots[i], cfg, i + 1)
+                except Exception as e:
+                    print(f"    [erro id] slot {i+1}: {type(e).__name__} {e}")
+
+            # FASE 3: so agora troca o nome (todos ja com id)
+            print(f"    [lote {n_lote}] alterando nomes de {len(entered)} guests...")
+            for i in entered:
+                try:
                     await change_name(slots[i], i + 1)
                 except Exception as e:
-                    print(f"    [erro] slot {i+1}: {type(e).__name__} {e}")
+                    print(f"    [erro nome] slot {i+1}: {type(e).__name__} {e}")
                 asyncio.create_task(keep_alive(slots[i], cfg))
 
         print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
