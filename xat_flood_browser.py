@@ -198,28 +198,27 @@ async def load_slot(slot: Slot, cfg: Config, idx: int) -> bool:
 
 
 async def do_action(slot: Slot, cfg: Config) -> bool:
-    """Envia uma mensagem no chat = a 'acao' que registra o id do guest."""
+    """Envia uma mensagem no chat = a 'acao' que registra o id do guest.
+    Usa timeouts NATIVOS do Playwright (wait_for/asyncio brigam mal sob carga)."""
     page = slot.page
     sels = ("#textEntryEditable", "#sendmsg", "#sendMsg",
             "[contenteditable='true']", "[role='textbox']")
-    deadline = time.time() + 10
-    while time.time() < deadline:
+    for _ in range(2):
         for frame in page.frames:
             for sel in sels:
                 try:
                     loc = frame.locator(sel).first
-                    vis = await asyncio.wait_for(loc.is_visible(), timeout=1)
-                    if vis:
-                        await asyncio.wait_for(loc.click(), timeout=2)
-                        await asyncio.wait_for(loc.type(cfg.msg, delay=25), timeout=6)
-                        await asyncio.wait_for(loc.press("Enter"), timeout=3)
-                        slot.actions += 1
-                        if slot.actions == 1:
-                            print(f"    [acao ok] frame={frame.url[:45]} sel={sel}")
-                        return True
+                    await loc.wait_for(state="visible", timeout=1500)
+                    await loc.click(timeout=1500)
+                    await loc.type(cfg.msg, delay=20, timeout=4000)
+                    await loc.press("Enter", timeout=1500)
+                    slot.actions += 1
+                    if slot.actions == 1:
+                        print(f"    [acao ok] frame={frame.url[:45]} sel={sel}")
+                    return True
                 except Exception:
                     continue
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.4)
     print("    [acao FALHOU] campo de mensagem nao encontrado")
     return False
 
@@ -227,10 +226,11 @@ async def do_action(slot: Slot, cfg: Config) -> bool:
 async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
     """Manda a mensagem (acao) que registra o id; espera um instante fixo.
     Nao depende mais do ws_count (o reconnect espontaneo confundia)."""
-    await do_action(slot, cfg)
-    await asyncio.sleep(2)
-    print(f"    [{idx}] id registrado")
-    return True
+    ok = await do_action(slot, cfg)
+    await asyncio.sleep(3)
+    if ok:
+        print(f"    [{idx}] id registrado")
+    return ok
 
 
 async def change_name(slot: Slot, idx: int):
@@ -238,50 +238,47 @@ async def change_name(slot: Slot, idx: int):
     page = slot.page
     name = slot.name
 
-    async def find_click(sel: str, timeout: float) -> bool:
-        """Polling nao-bloqueante: evita travar se o iframe recarregar."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+    async def find_click(sel: str, rounds: int) -> bool:
+        """Tenta clicar; re-le page.frames a cada rodada (iframe recarrega)."""
+        for _ in range(rounds):
             for frame in page.frames:
                 try:
                     loc = frame.locator(sel).first
-                    vis = await asyncio.wait_for(loc.is_visible(), timeout=2)
-                    if vis:
-                        await asyncio.wait_for(loc.click(), timeout=3)
-                        return True
+                    await loc.wait_for(state="visible", timeout=1200)
+                    await loc.click(timeout=1200)
+                    return True
                 except Exception:
                     continue
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.4)
         return False
 
     # 1. clica no nome (o id ja veio do settle -> guest aparece na lista)
-    if not await find_click("li.friend", 15):
+    if not await find_click("li.friend", 10):
         print(f"    [nome] sem li.friend ({idx})")
         return
 
-    # 2. digita o nome no #nameedit (polling, tolera recarga de frame)
+    # 2. digita o nome no #nameedit (timeouts nativos do Playwright)
     filled = False
-    deadline = time.time() + 12
-    while time.time() < deadline and not filled:
+    for _ in range(10):
         for frame in page.frames:
             try:
                 ta = frame.locator("#nameedit").first
-                vis = await asyncio.wait_for(ta.is_visible(), timeout=2)
-                if vis:
-                    await asyncio.wait_for(ta.click(), timeout=3)
-                    await asyncio.wait_for(ta.press("Control+A"), timeout=2)
-                    await asyncio.wait_for(ta.press("Backspace"), timeout=2)
-                    await asyncio.wait_for(ta.type(name, delay=20), timeout=8)
-                    await asyncio.wait_for(ta.press("Tab"), timeout=2)
-                    filled = True
-                    break
+                await ta.wait_for(state="visible", timeout=1200)
+                await ta.click(timeout=1200)
+                await ta.press("Control+A", timeout=1000)
+                await ta.press("Backspace", timeout=1000)
+                await ta.type(name, delay=20, timeout=4000)
+                await ta.press("Tab", timeout=1000)
+                filled = True
+                break
             except Exception:
                 continue
-        if not filled:
-            await asyncio.sleep(0.3)
+        if filled:
+            break
+        await asyncio.sleep(0.4)
 
-    # 5. clica no botao Salvar
-    await find_click("[data-localize='mob2.save']", 8)
+    # 3. clica no botao Salvar
+    await find_click("[data-localize='mob2.save']", 10)
     print(f"    [nome] {name}")
 
 
@@ -379,15 +376,10 @@ async def amain(cfg: Config):
                   f"alterando {len(entered)} nomes um por um...")
             for i in entered:
                 try:
-                    await asyncio.wait_for(settle(slots[i], cfg, i + 1),
-                                           timeout=35)
+                    await settle(slots[i], cfg, i + 1)
+                    await change_name(slots[i], i + 1)
                 except Exception as e:
-                    print(f"    [erro settle] slot {i+1}: {type(e).__name__} {e}")
-                try:
-                    await asyncio.wait_for(change_name(slots[i], i + 1),
-                                           timeout=35)
-                except Exception as e:
-                    print(f"    [erro nome] slot {i+1}: {type(e).__name__} {e}")
+                    print(f"    [erro] slot {i+1}: {type(e).__name__} {e}")
                 asyncio.create_task(keep_alive(slots[i], cfg))
 
         print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
