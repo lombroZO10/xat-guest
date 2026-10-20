@@ -289,6 +289,18 @@ async def change_name(slot: Slot, idx: int):
     print(f"    [nome] {name}")
 
 
+async def freeze_page(slot: Slot) -> bool:
+    """Congela a pagina (para de renderizar/JS) mas mantem o WebSocket vivo.
+    Economiza MUITA CPU: a aba fica parada, so a conexao de rede continua."""
+    try:
+        cdp = await slot.page.context.new_cdp_session(slot.page)
+        await cdp.send("Page.setWebLifecycleState", {"state": "frozen"})
+        await cdp.detach()
+        return True
+    except Exception:
+        return False
+
+
 async def keep_alive(slot: Slot, cfg: Config):
     while not slot.page.is_closed():
         await asyncio.sleep(cfg.keepalive)
@@ -409,7 +421,12 @@ async def amain(cfg: Config):
                 except Exception as e:
                     print(f"    [erro nome] slot {i+1}: {type(e).__name__} {e}")
                 if slots[i] is not None:
-                    asyncio.create_task(keep_alive(slots[i], cfg))
+                    # congela a aba pra liberar CPU; o WebSocket continua vivo.
+                    # se o freeze falhar, cai no keep_alive normal.
+                    if not await freeze_page(slots[i]):
+                        asyncio.create_task(keep_alive(slots[i], cfg))
+                    else:
+                        print(f"    [{i+1}] congelado (CPU liberada)")
 
         print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
 
