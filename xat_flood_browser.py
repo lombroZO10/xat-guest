@@ -33,6 +33,7 @@ class Config:
     concurrency: int = 8             # abas simultaneas no spawn
     keepalive: float = 45.0          # segundos entre "acoes" (abaixo do idle kick)
     msg: str = "oi"
+    block_media: bool = True         # bloqueia imagem/fonte/midia (economiza proxy)
 
 
 STEALTH_JS = """
@@ -89,6 +90,8 @@ def parse_args(argv) -> Config:
     ap.add_argument("--keepalive", type=float, default=45.0,
                     help="intervalo (s) da 'acao' que segura o guest vivo")
     ap.add_argument("--msg", default="oi", help="mensagem da acao")
+    ap.add_argument("--no-block-media", action="store_true",
+                    help="nao bloquear imagem/fonte/midia (consome mais proxy)")
     args = ap.parse_args(argv)
 
     proxies = []
@@ -108,7 +111,8 @@ def parse_args(argv) -> Config:
     return Config(room=args.room, count=args.count, proxies=proxies,
                   headless=not args.headed, connect_delay=args.connect_delay,
                   challenge_wait=args.challenge_wait, concurrency=args.concurrency,
-                  keepalive=args.keepalive, msg=args.msg)
+                  keepalive=args.keepalive, msg=args.msg,
+                  block_media=not args.no_block_media)
 
 
 class Slot:
@@ -236,6 +240,13 @@ async def amain(cfg: Config):
                 ctx_kwargs["proxy"] = {"server": proxy}
             context = await browser.new_context(**ctx_kwargs)
             await context.add_init_script(stealth_js(name))
+            if cfg.block_media:
+                async def route(route):
+                    if route.request.resource_type in ("image", "font", "media"):
+                        await route.abort()
+                    else:
+                        await route.continue_()
+                await context.route("**/*", route)
             page = await context.new_page()
             return Slot(context, page, proxy, name)
 
