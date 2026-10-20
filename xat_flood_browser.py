@@ -287,6 +287,26 @@ async def change_name(slot: Slot, idx: int):
             break
         await asyncio.sleep(0.3)
 
+    # 2b. confere o que ficou no campo (diagnostico do save)
+    try:
+        got = await page.evaluate("""() => {
+            const findIn = (doc) => doc.querySelector('#nameedit');
+            let el = findIn(document);
+            if (!el) {
+                for (const f of document.querySelectorAll('iframe')) {
+                    try {
+                        const d = f.contentDocument;
+                        if (d) { el = findIn(d); if (el) break; }
+                    } catch (e) {}
+                }
+            }
+            return el ? el.value : null;
+        }""")
+        if got != name:
+            print(f"    [nome] campo='{got}' (esperado '{name}')")
+    except Exception:
+        pass
+
     # 3. clica em Salvar
     await find_click("[data-localize='mob2.save']", 10)
     print(f"    [nome] {name}")
@@ -436,6 +456,9 @@ async def amain(cfg: Config):
                 except Exception as e:
                     print(f"    [erro nome] slot {i+1}: {type(e).__name__} {e}")
                 if slots[i] is not None:
+                    # espera o save ASSENTAR antes de congelar a aba (matar os
+                    # timers logo depois do clique cancelava o envio do nome)
+                    await asyncio.sleep(3)
                     if not await quiet_page(slots[i]):
                         asyncio.create_task(keep_alive(slots[i], cfg))
                     else:
