@@ -266,17 +266,20 @@ async def change_name(slot: Slot, idx: int):
             await asyncio.sleep(0.3)
         return False
 
-    # 1. clica no primeiro li.friend (nosso nome na lista)
+    # 1. clica no primeiro li.friend -> dispara a reconexao (registra o id)
     if not await find_click("li.friend", 8):
         return
 
-    # 2. espera a reconexao (ws 1 -> 2); o iframe recarrega aqui
+    # 2. espera a reconexao (ws 1 -> 2); o iframe recarrega aqui e fecha o dialog
     for _ in range(16):  # ate ~8s
         if slot.ws_count >= 2:
             break
         await asyncio.sleep(0.5)
 
-    # 3. digita o nome no #nameedit (polling, tolera recarga de frame)
+    # 3. clica no nome DE NOVO -> agora abre o dialog (guest ja registrado)
+    await find_click("li.friend", 8)
+
+    # 4. digita o nome no #nameedit (polling, tolera recarga de frame)
     filled = False
     deadline = time.time() + 12
     while time.time() < deadline and not filled:
@@ -296,7 +299,7 @@ async def change_name(slot: Slot, idx: int):
         if not filled:
             await asyncio.sleep(0.3)
 
-    # 4. clica no botao Salvar
+    # 5. clica no botao Salvar
     await find_click("[data-localize='mob2.save']", 8)
     print(f"    [nome] {name}")
 
