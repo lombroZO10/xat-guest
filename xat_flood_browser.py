@@ -290,9 +290,10 @@ async def change_name(slot: Slot, idx: int):
 
 
 async def quiet_page(slot: Slot) -> bool:
-    """Deixa a aba parada pra economizar CPU: congela animacoes e esconde o
-    corpo (o compositor para de desenhar). O WebSocket continua vivo — quem
-    cuida do socket e o processo do browser, nao o DOM."""
+    """Deixa a aba parada de vez pra economizar CPU:
+    - congela animacoes e esconde o corpo (para de desenhar)
+    - mata os timers/rAF (maior consumidor de CPU de um chat parado)
+    O WebSocket continua vivo: quem cuida do socket e o processo do browser."""
     try:
         await slot.page.evaluate("""() => {
             try {
@@ -301,6 +302,10 @@ async def quiet_page(slot: Slot) -> bool:
                     e.style.transition = 'none';
                 });
                 if (document.body) document.body.style.display = 'none';
+                for (let i = 1; i < 200000; i++) { clearTimeout(i); clearInterval(i); }
+                window.setTimeout = () => 0;
+                window.setInterval = () => 0;
+                window.requestAnimationFrame = () => 0;
             } catch (e) {}
         }""")
         return True
@@ -400,7 +405,7 @@ async def amain(cfg: Config):
             for i in entered:
                 try:
                     await asyncio.wait_for(settle(slots[i], cfg, i + 1),
-                                           timeout=15)
+                                           timeout=30)
                     ok_ids.append(i)
                 except asyncio.TimeoutError:
                     print(f"    [timeout] slot {i+1} travou no id, descartando")
@@ -417,7 +422,7 @@ async def amain(cfg: Config):
             for i in ok_ids:
                 try:
                     await asyncio.wait_for(change_name(slots[i], i + 1),
-                                           timeout=25)
+                                           timeout=45)
                 except asyncio.TimeoutError:
                     print(f"    [timeout] slot {i+1} travou no nome, descartando")
                     try:
