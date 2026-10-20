@@ -31,6 +31,7 @@ class Config:
     challenge_wait: float = 45.0
     viewport: tuple = (700, 520)     # menor = menos CPU
     concurrency: int = 8             # abas simultaneas no spawn
+    settle_concurrency: int = 2      # reconnects simultaneos (ponto de rate limit)
     keepalive: float = 45.0          # segundos entre "acoes" (abaixo do idle kick)
     msg: str = "oi"
     block_media: bool = True         # bloqueia imagem/fonte/midia (economiza proxy)
@@ -93,6 +94,8 @@ def parse_args(argv) -> Config:
     ap.add_argument("--connect-delay", type=float, default=1.0)
     ap.add_argument("--challenge-wait", type=float, default=45.0)
     ap.add_argument("--concurrency", type=int, default=8)
+    ap.add_argument("--settle-concurrency", type=int, default=2,
+                    help="reconnects simultaneos no assentamento (subir com cuidado)")
     ap.add_argument("--keepalive", type=float, default=45.0,
                     help="intervalo (s) da 'acao' que segura o guest vivo")
     ap.add_argument("--msg", default="oi", help="mensagem da acao")
@@ -119,6 +122,7 @@ def parse_args(argv) -> Config:
     return Config(room=args.room, count=args.count, proxies=proxies,
                   headless=not args.headed, connect_delay=args.connect_delay,
                   challenge_wait=args.challenge_wait, concurrency=args.concurrency,
+                  settle_concurrency=args.settle_concurrency,
                   keepalive=args.keepalive, msg=args.msg,
                   block_media=not args.no_block_media, block_css=args.block_css)
 
@@ -277,24 +281,38 @@ async def amain(cfg: Config):
         slots: list[Slot | None] = [None] * cfg.count
         start = time.time()
 
-        async def spawn_one(i: int):
-            slot = await new_slot(proxy_for(i), gen_name(i))
-            slots[i] = slot
-            try:
-                ok = await load_slot(slot, cfg, i + 1)
-                if ok:
-                    # registra o id e assenta ANTES de ir pro proximo
-                    await settle(slot, cfg, i + 1)
-                    asyncio.create_task(keep_alive(slot, cfg))
-            except Exception as e:
-                print(f"[{i+1}] erro: {e}")
+        # fase 1: carrega tudo em paralelo (concurrency limita o pico de CPU/RAM)
+        load_sem = asyncio.Semaphore(cfg.concurrency)
 
-        # sequencial: um entra, pega o id, fica; so entao parte pro proximo
-        for i in range(cfg.count):
-            await spawn_one(i)
-            await asyncio.sleep(cfg.connect_delay)
+        async def load_one(i: int):
+            async with load_sem:
+                slot = await new_slot(proxy_for(i), gen_name(i))
+                slots[i] = slot
+                try:
+                    return await load_slot(slot, cfg, i + 1)
+                except Exception as e:
+                    print(f"[{i+1}] erro: {e}")
+                    return False
 
-        print("\nSpawn completo. Mantendo vivos (Ctrl+C encerra).\n")
+        results = await asyncio.gather(*(load_one(i) for i in range(cfg.count)))
+
+        print("\nCarga completa. Assentando (reconexao) em fila limitada...\n")
+
+        # fase 2: assenta com fila curta — a reconexao e o ponto de rate limit
+        settle_sem = asyncio.Semaphore(cfg.settle_concurrency)
+
+        async def settle_one(i: int):
+            s = slots[i]
+            if s is None or s.page.is_closed():
+                return
+            async with settle_sem:
+                await settle(s, cfg, i + 1)
+                asyncio.create_task(keep_alive(s, cfg))
+
+        await asyncio.gather(*(settle_one(i) for i in range(cfg.count)
+                               if results[i]))
+
+        print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
 
         while True:
             for i, s in enumerate(slots):
