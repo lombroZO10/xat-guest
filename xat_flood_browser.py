@@ -197,41 +197,31 @@ async def load_slot(slot: Slot, cfg: Config, idx: int) -> bool:
     return False
 
 
-async def do_action(slot: Slot, cfg: Config):
-    """Envia uma mensagem no chat = a 'acao' que segura o guest vivo."""
+async def do_action(slot: Slot, cfg: Config) -> bool:
+    """Envia uma mensagem no chat = a 'acao' que registra o id do guest."""
     page = slot.page
-    frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
-
-    async def send(frame, sel):
-        loc = frame.locator(sel).first
-        await loc.wait_for(state="visible", timeout=2500)
-        await loc.click(timeout=2500)
-        await loc.type(cfg.msg, delay=25)
-        await loc.press("Enter", timeout=2500)
-
-    # alvo exato primeiro: o campo de mensagem do xat
-    for frame in frames:
-        try:
-            await send(frame, "#textEntryEditable")
-            slot.actions += 1
-            if slot.actions == 1:
-                print(f"    [acao ok] frame={frame.url[:45]} sel=#textEntryEditable")
-            return
-        except Exception:
-            continue
-
-    # fallback: outros seletores (se o id mudar)
-    for frame in frames:
-        for sel in ("#sendmsg", "#sendMsg", "[contenteditable='true']",
-                    "[role='textbox']"):
-            try:
-                await send(frame, sel)
-                slot.actions += 1
-                if slot.actions == 1:
-                    print(f"    [acao ok] frame={frame.url[:45]} sel={sel}")
-                return
-            except Exception:
-                continue
+    sels = ("#textEntryEditable", "#sendmsg", "#sendMsg",
+            "[contenteditable='true']", "[role='textbox']")
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        for frame in page.frames:
+            for sel in sels:
+                try:
+                    loc = frame.locator(sel).first
+                    vis = await asyncio.wait_for(loc.is_visible(), timeout=1)
+                    if vis:
+                        await asyncio.wait_for(loc.click(), timeout=2)
+                        await loc.type(cfg.msg, delay=25)
+                        await loc.press("Enter")
+                        slot.actions += 1
+                        if slot.actions == 1:
+                            print(f"    [acao ok] frame={frame.url[:45]} sel={sel}")
+                        return True
+                except Exception:
+                    continue
+        await asyncio.sleep(0.3)
+    print("    [acao FALHOU] campo de mensagem nao encontrado")
+    return False
 
 
 async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
@@ -393,11 +383,14 @@ async def amain(cfg: Config):
             for i in entered:
                 try:
                     await asyncio.wait_for(settle(slots[i], cfg, i + 1),
-                                           timeout=20)
-                    await asyncio.wait_for(change_name(slots[i], i + 1),
-                                           timeout=20)
+                                           timeout=35)
                 except Exception as e:
-                    print(f"    [erro lote] slot {i+1}: {e}")
+                    print(f"    [erro settle] slot {i+1}: {type(e).__name__} {e}")
+                try:
+                    await asyncio.wait_for(change_name(slots[i], i + 1),
+                                           timeout=35)
+                except Exception as e:
+                    print(f"    [erro nome] slot {i+1}: {type(e).__name__} {e}")
                 asyncio.create_task(keep_alive(slots[i], cfg))
 
         print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
