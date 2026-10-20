@@ -188,9 +188,8 @@ async def load_slot(slot: Slot, cfg: Config, idx: int) -> bool:
 async def do_action(slot: Slot, cfg: Config):
     """Envia uma mensagem no chat = a 'acao' que segura o guest vivo."""
     page = slot.page
-    sel_priority = ["#sendmsg", "#sendMsg", "textarea",
-                    "[contenteditable='true']", "[role='textbox']",
-                    "input[type='text']", "input"]
+    sel_priority = ["#sendmsg", "#sendMsg", "[contenteditable='true']",
+                    "textarea", "[role='textbox']"]
     frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame]
     for frame in frames:
         for sel in sel_priority:
