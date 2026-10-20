@@ -198,46 +198,35 @@ async def load_slot(slot: Slot, cfg: Config, idx: int) -> bool:
 
 
 async def do_action(slot: Slot, cfg: Config) -> bool:
-    """Envia mensagem: foca o campo via JS e usa o teclado do Playwright.
-    Sem locator/wait = nao pendura em iframe recarregando (o problema real)."""
+    """Envia mensagem com interacao REAL do Playwright (clique + digitacao),
+    mas achando o elemento por query_selector (nao-bloqueante, sem wait_for).
+    O page.keyboard puro digitava no frame errado; o click real foca certo."""
     page = slot.page
-    try:
-        found = await page.evaluate("""() => {
-            const sels = ['#textEntryEditable','#sendmsg','#sendMsg',
-                          "[contenteditable='true']","[role='textbox']"];
-            const findIn = (doc) => {
-                for (const s of sels) {
-                    const el = doc.querySelector(s);
-                    if (el) return el;
-                }
-                return null;
-            };
-            let el = findIn(document);
-            if (!el) {
-                for (const f of document.querySelectorAll('iframe')) {
-                    try {
-                        const d = f.contentDocument;
-                        if (d) { el = findIn(d); if (el) break; }
-                    } catch (e) {}
-                }
-            }
-            if (!el) return false;
-            try { el.focus(); } catch (e) { return false; }
-            return true;
-        }""")
-    except Exception:
-        return False
-    if not found:
-        return False
-    try:
-        await page.keyboard.type(cfg.msg, delay=15)
-        await page.keyboard.press("Enter")
-        slot.actions += 1
-        if slot.actions == 1:
-            print("    [acao ok] via js + teclado")
-        return True
-    except Exception:
-        return False
+    sels = ("#textEntryEditable", "#sendmsg", "#sendMsg",
+            "[contenteditable='true']", "[role='textbox']")
+    frames = [f for f in page.frames if f != page.main_frame]
+    frames.append(page.main_frame)
+    for _ in range(2):
+        for frame in frames:
+            for sel in sels:
+                try:
+                    el = await frame.query_selector(sel)
+                    if el is None:
+                        continue
+                    if not await el.is_visible():
+                        continue
+                    await el.click(timeout=2000)
+                    await el.type(cfg.msg, delay=15)
+                    await el.press("Enter")
+                    slot.actions += 1
+                    if slot.actions == 1:
+                        print(f"    [acao ok] frame={frame.url[:45]} sel={sel}")
+                    return True
+                except Exception:
+                    continue
+        await asyncio.sleep(0.3)
+    print("    [acao FALHOU] campo de mensagem nao encontrado")
+    return False
 
 
 async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
