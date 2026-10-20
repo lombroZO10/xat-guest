@@ -367,26 +367,29 @@ async def amain(cfg: Config):
                 print(f"[{i+1}] erro: {e}")
                 return False
 
-        # entra em paralelo (concurrency limita o pico), depois settle+nome com
-        # fila curta (a reconexao do settle e o ponto de rate limit).
-        enter_sem = asyncio.Semaphore(cfg.concurrency)
+        # lotes estritos: entra TODOS do lote de uma vez; so quando todos do
+        # lote estiverem com o nome, entra o proximo lote.
         settle_sem = asyncio.Semaphore(3)
 
-        async def process_one(i: int):
-            async with enter_sem:
-                ok = await enter(i)
-            if ok:
-                async with settle_sem:
-                    try:
-                        await asyncio.wait_for(settle(slots[i], cfg, i + 1),
-                                               timeout=20)
-                        await asyncio.wait_for(change_name(slots[i], i + 1),
-                                               timeout=20)
-                    except Exception:
-                        pass
-                asyncio.create_task(keep_alive(slots[i], cfg))
+        async def settle_and_name(i: int):
+            async with settle_sem:
+                try:
+                    await asyncio.wait_for(settle(slots[i], cfg, i + 1), timeout=20)
+                    await asyncio.wait_for(change_name(slots[i], i + 1), timeout=20)
+                except Exception:
+                    pass
+            asyncio.create_task(keep_alive(slots[i], cfg))
 
-        await asyncio.gather(*(process_one(i) for i in range(cfg.count)))
+        for batch_start in range(0, cfg.count, cfg.batch):
+            batch = list(range(batch_start, min(batch_start + cfg.batch, cfg.count)))
+            print(f"\n=== lote {batch_start // cfg.batch + 1}: "
+                  f"{len(batch)} conexoes ===\n")
+            # 1. entra TODOS do lote de uma vez (paralelo)
+            results = await asyncio.gather(*(enter(i) for i in batch))
+            entered = [i for i, r in zip(batch, results) if r]
+            # 2. settle + nome (fila de 3); nao passa pro proximo lote antes
+            #    de TODOS do lote terem nome
+            await asyncio.gather(*(settle_and_name(i) for i in entered))
 
         print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
 
