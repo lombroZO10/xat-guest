@@ -199,26 +199,29 @@ async def load_slot(slot: Slot, cfg: Config, idx: int) -> bool:
 
 async def do_action(slot: Slot, cfg: Config) -> bool:
     """Envia uma mensagem no chat = a 'acao' que registra o id do guest.
-    Usa timeouts NATIVOS do Playwright (wait_for/asyncio brigam mal sob carga)."""
+    O campo fica no IFRAME (box/www/cl), entao checa os iframes primeiro."""
     page = slot.page
     sels = ("#textEntryEditable", "#sendmsg", "#sendMsg",
             "[contenteditable='true']", "[role='textbox']")
+    # iframes primeiro (onde o campo realmente esta); main frame por ultimo
+    frames = [f for f in page.frames if f != page.main_frame]
+    frames.append(page.main_frame)
     for _ in range(2):
-        for frame in page.frames:
+        for frame in frames:
             for sel in sels:
                 try:
                     loc = frame.locator(sel).first
-                    await loc.wait_for(state="visible", timeout=1500)
-                    await loc.click(timeout=1500)
-                    await loc.type(cfg.msg, delay=20, timeout=4000)
-                    await loc.press("Enter", timeout=1500)
+                    await loc.wait_for(state="visible", timeout=900)
+                    await loc.click(timeout=900)
+                    await loc.type(cfg.msg, delay=20, timeout=3000)
+                    await loc.press("Enter", timeout=900)
                     slot.actions += 1
                     if slot.actions == 1:
                         print(f"    [acao ok] frame={frame.url[:45]} sel={sel}")
                     return True
                 except Exception:
                     continue
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.3)
     print("    [acao FALHOU] campo de mensagem nao encontrado")
     return False
 
@@ -227,7 +230,7 @@ async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
     """Manda a mensagem (acao) que registra o id; espera um instante fixo."""
     print(f"    [{idx}] settle: enviando mensagem...")
     ok = await do_action(slot, cfg)
-    await asyncio.sleep(3)
+    await asyncio.sleep(2)
     if ok:
         print(f"    [{idx}] id registrado")
     return ok
@@ -241,15 +244,17 @@ async def change_name(slot: Slot, idx: int):
     async def find_click(sel: str, rounds: int) -> bool:
         """Tenta clicar; re-le page.frames a cada rodada (iframe recarrega)."""
         for _ in range(rounds):
-            for frame in page.frames:
+            frames = [f for f in page.frames if f != page.main_frame]
+            frames.append(page.main_frame)
+            for frame in frames:
                 try:
                     loc = frame.locator(sel).first
-                    await loc.wait_for(state="visible", timeout=1200)
-                    await loc.click(timeout=1200)
+                    await loc.wait_for(state="visible", timeout=900)
+                    await loc.click(timeout=900)
                     return True
                 except Exception:
                     continue
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
         return False
 
     # 1. clica no nome (o id ja veio do settle -> guest aparece na lista)
@@ -260,22 +265,24 @@ async def change_name(slot: Slot, idx: int):
     # 2. digita o nome no #nameedit (timeouts nativos do Playwright)
     filled = False
     for _ in range(10):
-        for frame in page.frames:
+        frames = [f for f in page.frames if f != page.main_frame]
+        frames.append(page.main_frame)
+        for frame in frames:
             try:
                 ta = frame.locator("#nameedit").first
-                await ta.wait_for(state="visible", timeout=1200)
-                await ta.click(timeout=1200)
-                await ta.press("Control+A", timeout=1000)
-                await ta.press("Backspace", timeout=1000)
-                await ta.type(name, delay=20, timeout=4000)
-                await ta.press("Tab", timeout=1000)
+                await ta.wait_for(state="visible", timeout=900)
+                await ta.click(timeout=900)
+                await ta.press("Control+A", timeout=800)
+                await ta.press("Backspace", timeout=800)
+                await ta.type(name, delay=15, timeout=3000)
+                await ta.press("Tab", timeout=800)
                 filled = True
                 break
             except Exception:
                 continue
         if filled:
             break
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.3)
 
     # 3. clica no botao Salvar
     await find_click("[data-localize='mob2.save']", 10)
