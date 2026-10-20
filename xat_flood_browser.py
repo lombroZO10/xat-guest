@@ -243,14 +243,18 @@ async def change_name(slot: Slot, idx: int):
             break
         except Exception:
             continue
-    # 2. espera o dialog e preenche o campo de nome
-    await asyncio.sleep(0.5)
+    # 2. espera o dialog, limpa e digita o nome (teclado real)
+    await asyncio.sleep(0.8)
     for frame in frames:
         try:
             ta = frame.locator("#nameedit").first
             await ta.wait_for(state="visible", timeout=3000)
             await ta.click(timeout=2000)
-            await ta.fill(slot.name)
+            await ta.press("Control+A")
+            await ta.press("Backspace")
+            await ta.type(slot.name, delay=20)
+            val = await ta.input_value()
+            print(f"    [nome] digitado={val!r}")
             break
         except Exception:
             continue
@@ -260,8 +264,17 @@ async def change_name(slot: Slot, idx: int):
             btn = frame.locator("[data-localize='mob2.save']").first
             await btn.wait_for(state="visible", timeout=3000)
             await btn.click(timeout=2000)
-            print(f"    [nome] {slot.name}")
-            return
+            break
+        except Exception:
+            continue
+    # 4. verifica o nome que ficou na lista
+    await asyncio.sleep(1.0)
+    for frame in frames:
+        try:
+            nick = frame.locator("li.friend .userNick").first
+            txt = (await nick.inner_text()).strip()
+            print(f"    [nome] lista={txt!r}")
+            break
         except Exception:
             continue
 
