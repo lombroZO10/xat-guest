@@ -32,7 +32,7 @@ class Config:
     viewport: tuple = (700, 520)     # menor = menos CPU
     concurrency: int = 8             # abas simultaneas no spawn
     settle_concurrency: int = 2      # (legado, sem uso agora)
-    batch: int = 10                  # conexoes por lote
+    batch: int = 5                   # conexoes por lote (5 aguenta sem afogar a CPU)
     keepalive: float = 45.0          # segundos entre "acoes" (abaixo do idle kick)
     msg: str = "Dia 25 e oque? e 22 Flavioooo!"
     block_media: bool = True         # bloqueia imagem/fonte/midia (economiza proxy)
@@ -93,7 +93,7 @@ def parse_args(argv) -> Config:
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--settle-concurrency", type=int, default=2,
                     help="reconnects simultaneos no assentamento (subir com cuidado)")
-    ap.add_argument("--batch", type=int, default=10,
+    ap.add_argument("--batch", type=int, default=5,
                     help="conexoes por lote (entra N juntos, troca o nome, proximo lote)")
     ap.add_argument("--keepalive", type=float, default=45.0,
                     help="intervalo (s) da 'acao' que segura o guest vivo")
@@ -226,6 +226,7 @@ async def do_action(slot: Slot, cfg: Config) -> bool:
 async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
     """Manda a mensagem (acao) que registra o id; espera um instante fixo.
     Nao depende mais do ws_count (o reconnect espontaneo confundia)."""
+    print(f"    [{idx}] settle: enviando mensagem...")
     ok = await do_action(slot, cfg)
     await asyncio.sleep(3)
     if ok:
