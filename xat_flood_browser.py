@@ -253,6 +253,7 @@ async def change_name(slot: Slot, idx: int):
             await ta.press("Control+A")
             await ta.press("Backspace")
             await ta.type(slot.name, delay=20)
+            await ta.press("Tab")  # blur -> dispara o evento change do campo
             val = await ta.input_value()
             print(f"    [nome] digitado={val!r}")
             break
