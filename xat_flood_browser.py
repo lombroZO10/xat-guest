@@ -37,6 +37,7 @@ class Config:
     msg: str = "Dia 25 e oque? e 22 Flavioooo!"
     block_media: bool = True         # bloqueia imagem/fonte/midia (economiza proxy)
     block_css: bool = False          # bloqueia CSS tambem (mais economia, risco)
+    new_headless: bool = False       # channel=chromium (headless novo, furtivo)
 
 
 STEALTH_JS = """
@@ -102,6 +103,9 @@ def parse_args(argv) -> Config:
                     help="nao bloquear imagem/fonte/midia (consome mais proxy)")
     ap.add_argument("--block-css", action="store_true",
                     help="bloqueia CSS tambem (economiza mais; teste antes)")
+    ap.add_argument("--new-headless", action="store_true",
+                    help="headless novo (channel=chromium) - mais furtivo que o "
+                         "headless antigo; rode 'playwright install chromium' antes")
     args = ap.parse_args(argv)
 
     proxies = []
@@ -123,7 +127,8 @@ def parse_args(argv) -> Config:
                   challenge_wait=args.challenge_wait, concurrency=args.concurrency,
                   settle_concurrency=args.settle_concurrency, batch=args.batch,
                   keepalive=args.keepalive, msg=args.msg,
-                  block_media=not args.no_block_media, block_css=args.block_css)
+                  block_media=not args.no_block_media, block_css=args.block_css,
+                  new_headless=args.new_headless)
 
 
 class Slot:
@@ -359,8 +364,7 @@ def render(cfg: Config, slots: list, start: float) -> str:
 
 async def amain(cfg: Config):
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=cfg.headless,
+        launch_kwargs = dict(
             args=[
                 "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
@@ -375,6 +379,14 @@ async def amain(cfg: Config):
                 "AcceptCHFrame,MediaRouter,OptimizationHints,"
                 "CalculateNativeWinOcclusion",
             ])
+        if cfg.new_headless:
+            # headless NOVO (build chromium completo): mais furtivo que o
+            # headless antigo (shell), que o Cloudflare pega na hora.
+            launch_kwargs["channel"] = "chromium"
+            launch_kwargs["headless"] = True
+        else:
+            launch_kwargs["headless"] = cfg.headless
+        browser = await pw.chromium.launch(**launch_kwargs)
 
         def proxy_for(i: int) -> str | None:
             if not cfg.proxies:
