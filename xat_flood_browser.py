@@ -491,12 +491,27 @@ async def amain(cfg: Config):
                 except Exception as e:
                     print(f"    [erro id] slot {i+1}: {type(e).__name__} {e}")
 
+            # FASE 2b: espera TODOS do lote reconectarem (ws_count >= 2) antes
+            # de comecar a trocar nome. "reconectou" = id realmente registrado.
+            if ok_ids:
+                print(f"    [lote {n_lote}] esperando reconexao de "
+                      f"{len(ok_ids)} guests...")
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    pend = [i for i in ok_ids if slots[i].ws_count < 2]
+                    if not pend:
+                        break
+                    await asyncio.sleep(0.5)
+                faltou = [i + 1 for i in ok_ids if slots[i].ws_count < 2]
+                if faltou:
+                    print(f"    [lote {n_lote}] sem reconectar: {faltou}")
+
             # FASE 3: so agora troca o nome (nos que pegaram id)
             print(f"    [lote {n_lote}] alterando nomes de {len(ok_ids)} guests...")
             for i in ok_ids:
                 try:
                     await asyncio.wait_for(change_name(slots[i], i + 1),
-                                           timeout=45)
+                                           timeout=30)
                 except asyncio.TimeoutError:
                     print(f"    [timeout] slot {i+1} travou no nome, descartando")
                     try:
