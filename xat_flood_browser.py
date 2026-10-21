@@ -38,6 +38,7 @@ class Config:
     block_media: bool = True         # bloqueia imagem/fonte/midia (economiza proxy)
     block_css: bool = False          # bloqueia CSS tambem (mais economia, risco)
     new_headless: bool = False       # channel=chromium (headless novo, furtivo)
+    deep_freeze: float = 0.0         # s: mata os timers N s apos assentar
 
 
 STEALTH_JS = """
@@ -106,6 +107,9 @@ def parse_args(argv) -> Config:
     ap.add_argument("--new-headless", action="store_true",
                     help="headless novo (channel=chromium) - mais furtivo que o "
                          "headless antigo; rode 'playwright install chromium' antes")
+    ap.add_argument("--deep-freeze", type=float, default=0.0,
+                    help="mata timers/JS N segundos apos o guest assentar "
+                         "(CPU minima; a reconexao do chat deixa de funcionar)")
     args = ap.parse_args(argv)
 
     proxies = []
@@ -128,7 +132,7 @@ def parse_args(argv) -> Config:
                   settle_concurrency=args.settle_concurrency, batch=args.batch,
                   keepalive=args.keepalive, msg=args.msg,
                   block_media=not args.no_block_media, block_css=args.block_css,
-                  new_headless=args.new_headless)
+                  new_headless=args.new_headless, deep_freeze=args.deep_freeze)
 
 
 class Slot:
@@ -317,6 +321,32 @@ async def change_name(slot: Slot, idx: int):
     print(f"    [nome] {name}")
 
 
+async def deep_freeze(slot: Slot) -> bool:
+    """Mata timers/rAF de vez = CPU quase zero por aba.
+    So usar com o guest ja ESTAVEL na sala: a reconexao do chat para de
+    funcionar (se cair, so reabrindo a aba)."""
+    try:
+        await slot.page.evaluate("""() => {
+            try {
+                for (let i = 1; i < 300000; i++) { clearTimeout(i); clearInterval(i); }
+                window.setTimeout = () => 0;
+                window.setInterval = () => 0;
+                window.requestAnimationFrame = () => 0;
+            } catch (e) {}
+        }""")
+        return True
+    except Exception:
+        return False
+
+
+async def deep_freeze_later(slot: Slot, cfg: Config, idx: int):
+    await asyncio.sleep(cfg.deep_freeze)
+    if slot.page.is_closed() or slot.ws_count == 0:
+        return
+    if await deep_freeze(slot):
+        print(f"    [{idx}] congelado de vez (CPU minima)")
+
+
 async def quiet_page(slot: Slot) -> bool:
     """Deixa a aba leve SEM quebrar a reconexao do chat:
     - congela animacoes e esconde o corpo (para de desenhar)
@@ -484,6 +514,9 @@ async def amain(cfg: Config):
                         asyncio.create_task(keep_alive(slots[i], cfg))
                     else:
                         print(f"    [{i+1}] aba parada (CPU liberada)")
+                        if cfg.deep_freeze > 0:
+                            asyncio.create_task(
+                                deep_freeze_later(slots[i], cfg, i + 1))
 
         print("\nTudo assenta. Mantendo vivos (Ctrl+C encerra).\n")
 
