@@ -241,11 +241,18 @@ async def do_action(slot: Slot, cfg: Config) -> bool:
 async def settle(slot: Slot, cfg: Config, idx: int) -> bool:
     """Manda a mensagem (acao) que registra o id; espera um instante fixo."""
     print(f"    [{idx}] settle: enviando mensagem...")
-    ok = await do_action(slot, cfg)
-    await asyncio.sleep(2)
-    if ok:
-        print(f"    [{idx}] id registrado")
-    return ok
+    # manda a mensagem e espera a RECONEXAO (e ela que registra o id).
+    # se nao reconectou em ~6s, manda de novo (ate 3x).
+    for _ in range(3):
+        ok = await do_action(slot, cfg)
+        if ok:
+            for _ in range(12):  # ate ~6s
+                if slot.ws_count >= 2:
+                    print(f"    [{idx}] id registrado")
+                    return True
+                await asyncio.sleep(0.5)
+    print(f"    [{idx}] nao reconectou apos 3 mensagens")
+    return False
 
 
 async def change_name(slot: Slot, idx: int):
@@ -496,7 +503,7 @@ async def amain(cfg: Config):
             if ok_ids:
                 print(f"    [lote {n_lote}] esperando reconexao de "
                       f"{len(ok_ids)} guests...")
-                deadline = time.time() + 10
+                deadline = time.time() + 60
                 while time.time() < deadline:
                     pend = [i for i in ok_ids if slots[i].ws_count < 2]
                     if not pend:
@@ -511,7 +518,7 @@ async def amain(cfg: Config):
             for i in ok_ids:
                 try:
                     await asyncio.wait_for(change_name(slots[i], i + 1),
-                                           timeout=30)
+                                           timeout=45)
                 except asyncio.TimeoutError:
                     print(f"    [timeout] slot {i+1} travou no nome, descartando")
                     try:
