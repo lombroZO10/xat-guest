@@ -55,7 +55,7 @@ if (oq) {
 
 def gen_name(i: int) -> str:
     # guest 1 = "...22!", guest 2 = "...22!!", etc.
-    return "Dia 22 e oque? 22" + "!" * (i + 1)
+    return "Dia 25 e oque? 22" + "!" * (i + 1)
 
 
 def stealth_js(name: str) -> str:
@@ -361,9 +361,20 @@ async def amain(cfg: Config):
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=cfg.headless,
-            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
-                  "--disable-blink-features=AutomationControlled",
-                  "--disable-extensions", "--mute-audio"])
+            args=[
+                "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-extensions", "--mute-audio",
+                # --- economia de CPU/RAM por aba (escala p/ mais conexoes) ---
+                "--blink-settings=imagesEnabled=false",   # sem decode de imagem
+                "--js-flags=--max-old-space-size=48",     # heap JS pequeno
+                "--disable-accelerated-2d-canvas",
+                "--disable-background-networking",
+                "--disable-sync", "--no-first-run",
+                "--disable-features=Translate,BackForwardCache,"
+                "AcceptCHFrame,MediaRouter,OptimizationHints,"
+                "CalculateNativeWinOcclusion",
+            ])
 
         def proxy_for(i: int) -> str | None:
             if not cfg.proxies:
